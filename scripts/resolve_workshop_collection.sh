@@ -23,10 +23,11 @@ for _ in 1 2 3; do
     'https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/')"
 
   # Rows: "item <id>" for workshop items, "collection <id>" for nested collections.
+  # Only collections come back with result 1, empty ones included; plain items get result 9.
   rows="$(jq -r '
     .response.collectiondetails[]
-    | if (.children // []) == [] then "item \(.publishedfileid)"
-      else .children[] | "\(if .filetype == 2 then "collection" else "item" end) \(.publishedfileid)"
+    | if .result == 1 then (.children // [])[] | "\(if .filetype == 2 then "collection" else "item" end) \(.publishedfileid)"
+      else "item \(.publishedfileid)"
       end
   ' <<< "${response}")"
 

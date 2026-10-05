@@ -166,14 +166,15 @@ test_maps() {
 test_workshop() {
   TEST=workshop
   new_env
-  # A fake Steam API: 111 is a collection holding item 333 and collection 444 (item 555); 222 is an item.
+  # A fake Steam API: 111 is a collection holding item 333, collection 444 (item 555) and the empty
+  # collection 666; 222 is an item.
   mkdir -p "${WORK}/bin"
   cat > "${WORK}/bin/curl" <<'CURL'
 #!/bin/bash
 if [[ "$*" == *"=444"* ]]; then
-  echo '{"response":{"collectiondetails":[{"publishedfileid":"444","children":[{"publishedfileid":"555","filetype":0}]}]}}'
+  echo '{"response":{"collectiondetails":[{"publishedfileid":"444","result":1,"children":[{"publishedfileid":"555","filetype":0}]},{"publishedfileid":"666","result":1,"children":[]}]}}'
 else
-  echo '{"response":{"collectiondetails":[{"publishedfileid":"111","children":[{"publishedfileid":"333","filetype":0},{"publishedfileid":"444","filetype":2}]},{"publishedfileid":"222","result":9}]}}'
+  echo '{"response":{"collectiondetails":[{"publishedfileid":"111","result":1,"children":[{"publishedfileid":"333","filetype":0},{"publishedfileid":"444","filetype":2},{"publishedfileid":"666","filetype":2}]},{"publishedfileid":"222","result":9}]}}'
 fi
 CURL
   chmod +x "${WORK}/bin/curl"
