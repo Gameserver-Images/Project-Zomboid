@@ -72,7 +72,7 @@ Every restart brings the game up to date, which matters because updated clients 
 
 ## Mods and maps
 
-* `WORKSHOP_IDS`: workshop item and collection IDs separated by `;`. Collections are expanded into their items; private or unlisted ones need `STEAM_API_KEY`. The server downloads the items while it starts. Items that are removed, hidden or private on the workshop are left out with a warning, since the server can't download them and would stop with an error.
+* `WORKSHOP_IDS`: workshop item and collection IDs separated by `;`. Collections are expanded into their items; private or unlisted ones need `STEAM_API_KEY`. The server downloads the items while it starts. Items that are removed, hidden or private on the workshop are left out with a warning, since the server can't download them and would stop with an error; one it already downloaded stays, without updates.
 * `INI_Mods`: the mod IDs to enable, separated by `;`. On Build 42 each one starts with a backslash (`INI_Mods=\ModOne;\ModTwo`); write a single backslash in the env file.
 
 Maps from enabled mods are added to the `Map=` line automatically, before the vanilla map, with their spawn points. Since downloads happen while the server starts, a new map is added on the start after the one that downloaded it. Taking a map mod out of `INI_Mods` removes its maps again.
