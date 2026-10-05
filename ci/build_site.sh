@@ -1,5 +1,5 @@
 #!/bin/bash
-# Assembles the docs site: the page, the env references in <site>/env, and an index of them.
+# Assembles the docs site: the pages, the env references in <site>/env, and an index of them.
 # References for earlier game builds are copied from the live site, because each deploy replaces it.
 # Usage: build_site.sh <site dir> <live site URL>
 
@@ -9,7 +9,7 @@ site="$1"
 base="$2"
 env_dir="${site}/env"
 mkdir -p "${env_dir}"
-cp site/index.html "${site}/index.html"
+cp site/index.html site/mods.html "${site}/"
 
 live_index="$(mktemp)"
 status="$(curl -sS -o "${live_index}" -w '%{http_code}' "${base}/env/index.json")"

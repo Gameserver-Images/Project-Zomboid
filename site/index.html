@@ -19,7 +19,12 @@
     html { scroll-padding-top: 112px; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
     main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 64px; }
-    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    .top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; margin-bottom: 4px; }
+    h1 { font-size: 1.4rem; margin: 0; }
+    .site-nav { display: flex; gap: 14px; font-size: 0.92rem; }
+    .site-nav a { color: var(--muted); text-decoration: none; }
+    .site-nav a:hover { color: var(--accent); }
+    .site-nav a[aria-current="page"] { color: var(--text); font-weight: 600; }
     p.lead { color: var(--muted); margin: 0 0 20px; max-width: 760px; }
     code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
     .layout { display: grid; gap: 16px; }
@@ -55,7 +60,10 @@
 </head>
 <body>
 <main>
-  <h1>Project Zomboid server env vars</h1>
+  <header class="top">
+    <h1>Project Zomboid server env vars</h1>
+    <nav class="site-nav"><a href="./" aria-current="page">Env vars</a><a href="mods.html">Mods</a></nav>
+  </header>
   <p class="lead">
     Every variable the <code>ghcr.io/gameserver-images/project-zomboid</code> image reads, listed from a freshly started server for each game build.
     Mods add more settings; <code>docker exec &lt;container&gt; list-env</code> lists them for your own server. Click a name to copy it.
