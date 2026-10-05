@@ -1,17 +1,240 @@
 #!/bin/bash
-# Workshop items and the maps that enabled mods bring along.
+# Workshop items, the mods in them and the maps that enabled mods bring along.
 
 VANILLA_MAP="Muldraugh, KY"
 
+console_game_version() {
+  # Prints the game version the server logged at its last start, nothing before the first start.
+  local console="${HOMEDIR}/Zomboid/server-console.txt"
+  [ -f "${console}" ] || return 0
+  grep -m 1 -oE '(versionNumber=|[[:space:]>]version=|ZNet: Startup version )[0-9]+\.[0-9]+(\.[0-9]+)?' "${console}" \
+    | head -n 1 | sed 's/.*[= ]//' || true
+}
+
+# Reads the mod.info of every mod in the given items. Build 41 loads the one in the mod folder itself,
+# Build 42 the one in the highest version folder (42, 42.12, ...) that is not newer than the game.
+mod_info_rows() {
+  # $1 = game version ("" when unknown), then the mods folders of the items (<item>/mods).
+  # Prints per mod folder: item (the item folder's name), folder, version folder ("." for the mod
+  # folder itself), whether it loads (1, 0, or ? for an unknown version; when it doesn't, the newest
+  # mod.info is read), id, name, description, author, modversion, url, category, versionMin,
+  # versionMax, the mod IDs of require, loadModAfter, loadModBefore and incompatible, separated by
+  # commas, and the path of the mod folder.
+  local version="$1" dir
+  local -a dirs=()
+  shift
+  for dir in "$@"; do
+    [ -d "${dir}" ] && dirs+=("${dir}")
+  done
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  find "${dirs[@]}" -mindepth 2 -maxdepth 3 -name mod.info -type f -printf '%H\t%P\n' \
+    | LC_ALL=C awk -F '\t' -v version="${version}" '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function newer(a, b,   x, y, n, m, i, d) {
+      n = split(a, x, ".")
+      m = split(b, y, ".")
+      for (i = 1; i <= n || i <= m; i++) {
+        d = (i <= n ? x[i] + 0 : 0) - (i <= m ? y[i] + 0 : 0)
+        if (d != 0) return d > 0
+      }
+      return 0
+    }
+    # "\A, 2392709985\B;C;A" -> "A,B,C"
+    function mod_ids(s,   n, parts, i, id, out, seen) {
+      n = split(s, parts, /[,;]/)
+      out = ""
+      for (i = 1; i <= n; i++) {
+        id = parts[i]
+        sub(/.*\\/, "", id)
+        id = trim(id)
+        if (id == "" || (id in seen)) continue
+        seen[id] = 1
+        out = out (out == "" ? "" : ",") id
+      }
+      return out
+    }
+    function field(key,   v) { v = info[key]; gsub(/\t/, " ", v); return v }
+    function read_info(path,   line, i, first) {
+      split("", info)
+      first = 1
+      while ((getline line < path) > 0) {
+        if (first) sub(/^\357\273\277/, "", line)
+        first = 0
+        sub(/\r$/, "", line)
+        i = index(line, "=")
+        if (i > 1) info[tolower(trim(substr(line, 1, i - 1)))] = trim(substr(line, i + 1))
+      }
+      close(path)
+    }
+    # <mods folder> TAB <mod folder>/mod.info or <mod folder>/<version folder>/mod.info
+    {
+      dir = $1
+      sub(/\/+$/, "", dir)
+      n = split($2, part, "/")
+      key = dir "/" part[1]
+      if (!(key in found)) {
+        found[key] = 1
+        keys[++count] = key
+        item[key] = dir
+        sub(/\/[^\/]*$/, "", item[key])
+        sub(/.*\//, "", item[key])
+        folder[key] = part[1]
+      }
+      if (n == 2) {
+        root[key] = 1
+        next
+      }
+      if (part[2] !~ /^[0-9]+(\.[0-9]+)*$/) next
+      if (!(key in newest) || newer(part[2], newest[key])) newest[key] = part[2]
+      if (version != "" && !newer(part[2], version) && (!(key in loads) || newer(part[2], loads[key]))) loads[key] = part[2]
+    }
+    END {
+      split(version, v, ".")
+      for (i = 1; i <= count; i++) {
+        key = keys[i]
+        best = (key in newest) ? newest[key] : ((key in root) ? "." : "")
+        if (best == "") continue
+        if (version == "") {
+          state = "?"
+        } else if (v[1] + 0 < 42) {
+          state = (key in root) ? 1 : 0
+          if (state) best = "."
+        } else {
+          state = (key in loads) ? 1 : 0
+          if (state) best = loads[key]
+        }
+        read_info(key "/" best "/mod.info")
+        author = ("author" in info) ? field("author") : field("authors")
+        print item[key] "\t" folder[key] "\t" best "\t" state "\t" field("id") "\t" field("name") "\t" field("description") "\t" \
+          author "\t" field("modversion") "\t" field("url") "\t" field("category") "\t" field("versionmin") "\t" \
+          field("versionmax") "\t" mod_ids(info["require"]) "\t" mod_ids(info["loadmodafter"]) "\t" \
+          mod_ids(info["loadmodbefore"]) "\t" mod_ids(info["incompatible"]) "\t" key
+      }
+    }
+  '
+}
+
+mod_dirs() {
+  # stdin = mod_info_rows output. Prints for each mod that loads: item, folder, rank, a folder its
+  # files come from and the mod ID: the version folder (rank 0), then common/ (rank 1), which Build
+  # 42 mods share between versions. The ID goes last because it can be empty, and read with a tab
+  # IFS merges empty fields.
+  awk -F '\t' '$4 == 1 {
+    print $1 "\t" $2 "\t0\t" ($3 == "." ? $18 : $18 "/" $3) "\t" $5
+    if ($3 != ".") print $1 "\t" $2 "\t1\t" $18 "/common\t" $5
+  }'
+}
+
+# Warns about enabled mods that are in no downloaded item and not in Zomboid/mods, that miss a mod
+# they require, that are listed in the wrong order or that conflict. Items download while the server
+# starts, so missing mods are only reported once every item in WorkshopItems is there, and the
+# version folders are picked by the game version of the last start.
+report_mod_problems() {
+  # $1 = INI file, $2 = workshop content dir
+  local ini_file="$1" content_dir="$2" mods item check_missing=1
+  local -a items=()
+  mods="$(ini_value "${ini_file}" Mods)"
+  [ -n "${mods//[[:space:];\\]/}" ] || return 0
+  IFS=';' read -ra items <<< "$(ini_value "${ini_file}" WorkshopItems)"
+  for item in "${items[@]}"; do
+    item="${item//[[:space:]]/}"
+    if [ -n "${item}" ] && [ ! -d "${content_dir}/${item}" ]; then
+      check_missing=0
+    fi
+  done
+  # Zomboid/mods holds mods placed there by hand, which load like the ones of an item.
+  mod_info_rows "$(console_game_version)" "${content_dir}"/*/mods "${HOMEDIR}/Zomboid/mods" \
+    | MODS="${mods}" awk -F '\t' -v check_missing="${check_missing}" '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function wrong_order(mod, other, text,   pair) {
+      pair = mod < other ? mod SUBSEP other : other SUBSEP mod
+      if (pair in reported) return
+      reported[pair] = 1
+      print "Warning: " text
+    }
+    # The lists of the first copy that loads, per mod ID and per item and mod ID.
+    function keep(k) {
+      if (k in requires) return
+      requires[k] = $14
+      after[k] = $15
+      before[k] = $16
+      incompatible[k] = $17
+    }
+    # Entries are `\ModId`, `<workshop id>\ModId` or a plain Build 41 `ModId`.
+    BEGIN {
+      n = split(ENVIRON["MODS"], entries, ";")
+      for (e = 1; e <= n; e++) {
+        m = split(entries[e], part, /\\/)
+        id = trim(part[m])
+        if (id == "") continue
+        item = ""
+        for (k = 1; k < m && item == ""; k++) item = trim(part[k])
+        order[++count] = id
+        from[count] = item
+        if (!(id in pos)) pos[id] = count
+      }
+    }
+    { downloaded[$5] = 1 }
+    $4 == 1 && ($5 in pos) {
+      keep($5)
+      keep($1 SUBSEP $5)
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        mod = order[i]
+        if (pos[mod] == i && check_missing && !(mod in downloaded)) {
+          print "Warning: Mods= enables " mod ", but neither a downloaded workshop item nor Zomboid/mods has it."
+        }
+        # An entry naming its item checks that copy; one without, or naming an item without it, the first copy.
+        key = (from[i] SUBSEP mod) in requires ? from[i] SUBSEP mod : mod
+        if (!(key in requires) || checked[key]++) continue
+        n = split(requires[key], list, ",")
+        for (j = 1; j <= n; j++) {
+          if (!(list[j] in pos)) {
+            # Two copies of a mod ID can require the same mod.
+            if (!((mod, list[j]) in unmet)) print "Warning: " mod " requires " list[j] ", which is not in Mods=."
+            unmet[mod, list[j]] = 1
+          } else if (pos[list[j]] > i) {
+            wrong_order(mod, list[j], "Mods= lists " mod " before " list[j] ", which it requires.")
+          }
+        }
+        n = split(after[key], list, ",")
+        for (j = 1; j <= n; j++) {
+          if ((list[j] in pos) && pos[list[j]] > i) wrong_order(mod, list[j], "Mods= lists " mod " before " list[j] ", but its mod.info says to load it after " list[j] ".")
+        }
+        n = split(before[key], list, ",")
+        for (j = 1; j <= n; j++) {
+          if ((list[j] in pos) && pos[list[j]] < i) wrong_order(mod, list[j], "Mods= lists " mod " after " list[j] ", but its mod.info says to load it before " list[j] ".")
+        }
+        n = split(incompatible[key], list, ",")
+        for (j = 1; j <= n; j++) {
+          other = list[j]
+          if (!(other in pos) || other == mod) continue
+          pair = mod < other ? mod SUBSEP other : other SUBSEP mod
+          if (pair in conflict) continue
+          conflict[pair] = 1
+          print "Warning: " mod " and " other " are both in Mods=, but the mod.info of " mod " says they are incompatible."
+        }
+      }
+    }
+  ' >&2
+}
+
+split_list() {
+  # $1 = ';'-separated list; prints the entries one per line, trimmed, without empty ones
+  tr ';' '\n' <<< "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+}
+
 apply_workshop_ids() {
   # $1 = INI file. Collections in WORKSHOP_IDS are expanded to the items they contain.
-  local ini_file="$1" resolved
+  local ini_file="$1" ids resolved
   [ -n "${WORKSHOP_IDS+x}" ] || return 0
-  if [ -z "${WORKSHOP_IDS}" ]; then
+  ids="$(split_list "${WORKSHOP_IDS}" | paste -sd ';')"
+  if [ -z "${ids}" ]; then
     set_ini_value "${ini_file}" WorkshopItems ""
     return 0
   fi
-  if ! resolved="$(bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" "${WORKSHOP_IDS}")" || [ -z "${resolved}" ]; then
+  if ! resolved="$(bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" "${ids}")" || [ -z "${resolved}" ]; then
     echo "Warning: could not resolve WORKSHOP_IDS through the Steam API, leaving WorkshopItems unchanged." >&2
     return 0
   fi
@@ -26,25 +249,22 @@ enabled_mod_ids() {
 }
 
 mod_maps() {
-  # $1 = workshop content dir, $2 = file of enabled mod IDs.
-  # Prints "<enabled|disabled>\t<map name>\t<map dir>" for each map of a downloaded mod. B41 mods
-  # keep files in mods/<mod>/, B42 mods in versioned folders such as mods/<mod>/42/ and mods/<mod>/common/.
-  local content_dir="$1" enabled_file="$2" mod_dir info id state map_dir
-  for mod_dir in "${content_dir}"/*/mods/*/; do
-    [ -d "${mod_dir}" ] || continue
-    id=""
-    for info in "${mod_dir}mod.info" "${mod_dir}"*/mod.info; do
-      [ -f "${info}" ] || continue
-      id="$(sed -n 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*//p' "${info}" | tr -d '\r' | head -n 1)"
-      [ -n "${id}" ] && break
-    done
+  # stdin = mod_info_rows output, $1 = enabled mod IDs, one per line.
+  # Prints "<enabled|disabled>\t<map name>\t<map dir>" for each map of a mod that loads.
+  local id dir map_dir state
+  local -A enabled=()
+  while IFS= read -r id; do
+    [ -n "${id}" ] && enabled["${id}"]=1
+  done <<< "$1"
+  mod_dirs | while IFS=$'\t' read -r _ _ _ dir id; do
     [ -n "${id}" ] || continue
     state=disabled
-    grep -qxF "${id}" "${enabled_file}" && state=enabled
-    for map_dir in "${mod_dir}"media/maps/*/ "${mod_dir}"*/media/maps/*/; do
+    [ -n "${enabled[${id}]+x}" ] && state=enabled
+    for map_dir in "${dir}"/media/maps/*/; do
+      map_dir="${map_dir%/}"
       # Mods that patch the vanilla map ship a folder with its name; it's always in Map= anyway.
-      [ -d "${map_dir}" ] && [ "$(basename "${map_dir}")" != "${VANILLA_MAP}" ] || continue
-      printf '%s\t%s\t%s\n' "${state}" "$(basename "${map_dir}")" "${map_dir%/}"
+      [ -d "${map_dir}" ] && [ "${map_dir##*/}" != "${VANILLA_MAP}" ] || continue
+      printf '%s\t%s\t%s\n' "${state}" "${map_dir##*/}" "${map_dir}"
     done
   done
 }
@@ -108,12 +328,12 @@ remove_spawn_region() {
 # removes the maps of downloaded mods that are no longer enabled, which the server can't load.
 apply_mod_maps() {
   # $1 = INI file, $2 = spawnregions file, $3 = workshop content dir
-  local ini_file="$1" spawn_file="$2" content_dir="$3" enabled maps current merged state name dir
-  [ -d "${content_dir}" ] || return 0
-  enabled="$(mktemp)"
-  enabled_mod_ids "${ini_file}" > "${enabled}"
-  maps="$(mod_maps "${content_dir}" "${enabled}")"
-  rm -f "${enabled}"
+  local ini_file="$1" spawn_file="$2" content_dir="$3" version maps current merged state name dir
+  # The game version picks the version folders. It is known from the first start on, and nothing is
+  # downloaded before that.
+  version="$(console_game_version)"
+  [ -n "${version}" ] || return 0
+  maps="$(mod_info_rows "${version}" "${content_dir}"/*/mods | mod_maps "$(enabled_mod_ids "${ini_file}")")"
   [ -n "${maps}" ] || return 0
 
   local -a added=() dropped=()

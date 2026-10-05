@@ -4,7 +4,7 @@ ADMINUSERNAME	Admin account name created on the first start (default: admin).
 ADMINPASSWORD	Admin account password. Required on the first start, when the server creates its database; ignored afterwards.
 ADMINPASSWORD_FILE	File holding the admin password; takes precedence over ADMINPASSWORD.
 WORKSHOP_IDS	Workshop item and collection IDs separated by ';'. Collections are expanded and written to WorkshopItems. Set it empty to clear WorkshopItems.
-STEAM_API_KEY	Steam Web API key, only needed to expand private or unlisted collections in WORKSHOP_IDS.
+STEAM_API_KEY	Steam Web API key, only needed to expand private or unlisted collections in WORKSHOP_IDS and for list-mods to list each item's required items.
 SERVERPRESET	Sandbox preset (a file name in media/lua/shared/Sandbox) used to create the SandboxVars file when it does not exist.
 SERVERPRESETREPLACE	Overwrite an existing SandboxVars file with SERVERPRESET on every start (true/false).
 CONFIG_STRICT	Refuse to start when an INI_ or SANDBOX_ variable matches no setting or has a value of the wrong type (true/false).

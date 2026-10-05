@@ -134,14 +134,29 @@ test_maps() {
   new_env
   local content="${STEAMAPPDIR}/steamapps/workshop/content/108600" ini="${SERVER}/pzserver.ini" spawn="${SERVER}/pzserver_spawnregions.lua"
   make_mod 100 RavenCreek RavenCreekMod 42 "Raven Creek"
-  make_mod 200 Bedford BedfordFalls "" "Bedford Falls"
+  make_mod 200 Bedford BedfordFalls 42 "Bedford Falls"
   make_mod 300 Unused UnusedMod 42 "Unused Map"
   make_mod 400 Patch VanillaPatch 42 "Muldraugh, KY"
   mkdir -p "${content}/100/mods/RavenCreek/common/media/maps/Raven Creek Extra"
-  set_ini_value "${ini}" Mods '\RavenCreekMod;2392709985\BedfordFalls;\VanillaPatch'
+  # Build 41 files and a version folder newer than the game don't load on 42.21.
+  make_mod 500 Old41 Old41Mod "" "B41 Map"
+  make_mod 600 Multi MultiMod 42 "Older Map"
+  make_mod 600 Multi MultiMod 42.21 "New Map"
+  make_mod 600 Multi MultiMod 42.22 "Future Map"
+  # The mod ID comes from the version folder that loads, not from the mod folder itself.
+  make_mod 700 Renamed OldId "" "Renamed Map"
+  make_mod 700 Renamed NewId 42 "Renamed Map"
+  set_ini_value "${ini}" Mods '\RavenCreekMod;2392709985\BedfordFalls;\VanillaPatch;\Old41Mod;\MultiMod;\NewId'
   set_ini_value "${ini}" Map 'Admin Map;Unused Map;Muldraugh, KY'
+
+  # Before the first start the game version, and with it the version folders, is unknown.
   apply_mod_maps "${ini}" "${spawn}" "${content}" >/dev/null
-  expect_line "${ini}" 'Map=Admin Map;Raven Creek;Raven Creek Extra;Bedford Falls;Muldraugh, KY'
+  expect_line "${ini}" 'Map=Admin Map;Unused Map;Muldraugh, KY'
+  grep -q 'Raven Creek' "${spawn}" && fail "spawnregions changed without a game version"
+
+  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  apply_mod_maps "${ini}" "${spawn}" "${content}" >/dev/null
+  expect_line "${ini}" 'Map=Admin Map;Raven Creek;Raven Creek Extra;Bedford Falls;New Map;Renamed Map;Muldraugh, KY'
   expect_line "${spawn}" '		{ name = "Raven Creek", file = "media/maps/Raven Creek/spawnpoints.lua" },'
 
   # A second start changes nothing.
@@ -157,6 +172,13 @@ test_maps() {
   expect_line "${ini}" 'Map=Admin Map;Bedford Falls;Muldraugh, KY'
   grep -q 'Raven Creek' "${spawn}" && fail "the spawn region of a disabled mod was kept"
   expect_line "${spawn}" '		{ name = "Muldraugh, KY", file = "media/maps/Muldraugh, KY/spawnpoints.lua" },'
+
+  # Build 41 loads the mod folder itself.
+  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  set_ini_value "${ini}" Mods 'Old41Mod;RavenCreekMod'
+  set_ini_value "${ini}" Map 'Muldraugh, KY'
+  apply_mod_maps "${ini}" "${spawn}" "${content}" >/dev/null
+  expect_line "${ini}" 'Map=B41 Map;Muldraugh, KY'
 
   expect_eq "$(merge_map_list "" "" "A")" "A;Muldraugh, KY"
   expect_eq "$(merge_map_list "B;Muldraugh, KY;B" "" "A")" "B;A;Muldraugh, KY"
@@ -178,11 +200,293 @@ else
 fi
 CURL
   chmod +x "${WORK}/bin/curl"
+  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 111;;222; ' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=222;333;555'
+  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' ; ' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems='
   PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='111;222' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null
   expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=222;333;555'
+  PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" --tree '111;222' > "${WORK}/out"
+  expect_eq "$(jq -s -c 'map({id, children: (.children // [] | map(.id + (if .collection then "c" else "" end)))})' "${WORK}/out")" \
+    '[{"id":"111","children":["333","444c","666c"]},{"id":"222","children":[]},{"id":"444","children":["555"]},{"id":"666","children":[]}]'
+  jq -e -s '.[1].children == null and .[3].children == []' "${WORK}/out" > /dev/null || fail "--tree did not tell items from empty collections"
   printf '#!/bin/bash\nexit 6\n' > "${WORK}/bin/curl"
   PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='111' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null 2>&1
   expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=222;333;555'
+}
+
+mod_file() {
+  # $1 = path in the workshop content dir; the content comes from stdin
+  local file="${STEAMAPPDIR}/steamapps/workshop/content/108600/$1"
+  mkdir -p "$(dirname "${file}")"
+  cat > "${file}"
+}
+
+fake_steam() {
+  # A fake Steam API on PATH that logs "<API> <ID count>" per call. 900 is a collection holding item
+  # 101, collection 910 (item 103 and the empty collection 920) and item 102. Item 104 is hidden.
+  # With the key "secret", item 101 requires item 102.
+  mkdir -p "${WORK}/bin"
+  cat > "${WORK}/bin/curl" <<'CURL'
+#!/bin/bash
+ids=()
+count=
+declare -A index=()
+for arg in "$@"; do
+  case "${arg}" in
+    publishedfileids\[*\]=*) i="${arg#*[}"; index[${i%%]*}]=1; ids+=("${arg#*=}") ;;
+    itemcount=* | collectioncount=*) count="${arg#*=}" ;;
+    https://*) url="${arg}" ;;
+  esac
+done
+url="${url%/v1/}"
+printf '%s %s\n' "${url##*/}" "${#ids[@]}" >> "${HOMEDIR}/steam-calls"
+[ -n "${FAKE_STEAM_DOWN:-}" ] && exit 6
+# Like Steam, refuse a request without publishedfileids[0..n-1] or, but for GetDetails, without a count of n.
+for ((i = 0; i < ${#ids[@]}; i++)); do
+  [ -n "${index[$i]:-}" ] || exit 22
+done
+[[ "${url}" == */GetDetails || "${count}" == "${#ids[@]}" ]] || exit 22
+ids="$(printf '%s\n' "${ids[@]}" | jq -R . | jq -s -c .)"
+case "${url}" in
+  */GetCollectionDetails)
+    jq -n -c --argjson ids "${ids}" '
+      {"900": [["101", 0], ["910", 2], ["102", 0]], "910": [["103", 0], ["920", 2]], "920": []} as $collections
+      | {response: {collectiondetails: [$ids[] | if $collections[.] then
+          {publishedfileid: ., result: 1, children: [$collections[.][] | {publishedfileid: .[0], filetype: .[1]}]}
+        else {publishedfileid: ., result: 9} end]}}' ;;
+  */GetPublishedFileDetails)
+    jq -n -c --argjson ids "${ids}" '{response: {publishedfiledetails: [$ids[] | if . == "104" then {publishedfileid: ., result: 9} else
+      {publishedfileid: ., result: 1, title: "Item \(.)", description: "[b]About \(.)[/b]", tags: [{tag: "Build 42"}],
+       time_updated: 1700000000, file_size: "4096"} end]}}' ;;
+  */GetDetails)
+    [[ "$*" == *"key=secret"* ]] || exit 22
+    jq -n -c --argjson ids "${ids}" '{response: {publishedfiledetails: [$ids[] | {publishedfileid: ., result: 1}
+      + if . == "101" then {children: [{publishedfileid: "102", sortorder: 1, file_type: 0}]} else {} end]}}' ;;
+esac
+CURL
+  chmod +x "${WORK}/bin/curl"
+}
+
+test_list_mods() {
+  TEST=list-mods
+  new_env
+  fake_steam
+  local out="${WORK}/mods.json" multi="101/mods/Multi Version"
+  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  # Item 101 has a Build 41 mod.info, Build 42 versions up to one newer than the game, a folder that is
+  # no version, and a second mod. Item 102 only has Build 41 and a folder that is no version, item 106
+  # is on disk only and has 42.0 and 42.5, which is older than 42.21.
+  printf '%s\r\n' 'name=Multi B41' 'id=MultiMod' 'modversion=41' | mod_file "${multi}/mod.info"
+  printf '%s\r\n' 'name=Multi 42' 'id=MultiMod' 'modversion=42' | mod_file "${multi}/42/mod.info"
+  printf '%s\r\n' 'name=Multi 42.5' 'id=MultiMod' 'modversion=42.5' | mod_file "${multi}/42.5/mod.info"
+  printf '%s\r\n' 'name=Multi 42.22' 'id=MultiMod' 'modversion=42.22' | mod_file "${multi}/42.22/mod.info"
+  printf '%s\r\n' 'name=Multi backup' 'id=MultiMod' 'modversion=backup' | mod_file "${multi}/backup/mod.info"
+  printf '%s\r\n' 'Name = Multi 42.21' 'id=MultiMod' 'modversion=42.21' 'authors=Someone' 'url=https://example.com' \
+    'Require=\StarlitLibrary , 2392709985\TsarLib; PlainReq' 'loadModAfter=AfterMe' 'loadModBefore=\BeforeOne,\BeforeTwo' \
+    'incompatible=\Enemy,' 'versionMin=42.21' | mod_file "${multi}/42.21/mod.info"
+  mod_file "${multi}/42.21/media/sandbox-options.txt" <<'EOF'
+VERSION = 1,
+option Multi.Mode
+{
+	type = enum, numValues = 3,
+	default = 1,
+	page = Multi,
+	translation = Multi_Mode,
+	valueTranslation = Multi_Modes,
+}
+option Multi.Strength
+{
+	type = integer,
+	min = -5,
+	max = 50,
+	default = 10,
+	page = Multi,
+	translation = Multi_Strength,
+}
+/*
+option Multi.Old
+{
+	type = boolean,
+	default = true,
+}
+*/ option Multi.Shared { type = double, /* was 2 */ default = 1.5, }
+option Multi.Separator
+{
+	translation = Multi_Separator,
+}
+option MultiNoDot
+{
+	type = boolean,
+	default = true,
+}
+EOF
+  printf '%s\r\n' 'option Multi.Shared' '{' '  type = double,' '  default = 9,' '}' 'option Multi.CommonOnly' '{' '  type = string,' \
+    '  default = Base.Axe;Base.Saw,' '  page = Elsewhere,' '}' | mod_file "${multi}/common/media/sandbox-options.txt"
+  printf '\357\273\277{\n  "Sandbox_Multi": "Multi settings",\n  "Sandbox_Multi_Mode": "Mode",\n  "Sandbox_Multi_Modes_option1": "Easy",\n  "Sandbox_Multi_Modes_option3": "Hard",\n  "Sandbox_Multi_Strength_tooltip": "How strong"\n}\n' \
+    | mod_file "${multi}/common/media/lua/shared/Translate/EN/Sandbox.json"
+  mkdir -p "${STEAMAPPDIR}/steamapps/workshop/content/108600/${multi}/"{42.21/media/maps/Variant\ Map,common/media/maps/Common\ Map,common/media/maps/Muldraugh\,\ KY,42/media/maps/Old\ Map}
+  printf '\357\273\277id=MultiAddon\r\nname=Addon\r\n' | mod_file 101/mods/Addon/42/mod.info
+  printf '%s\n' 'option Addon.Flag' '{' 'type = boolean,' 'default = false,' 'translation = Addon_Flag,' '}' \
+    'option Addon.Mode' '{' 'type = enum, numValues = 2,' 'default = 1,' 'valueTranslation = Addon_Modes,' '}' | mod_file 101/mods/Addon/42/media/sandbox-options.txt
+  printf '%s\n' 'Sandbox_EN = {' '    Sandbox_Addon_Flag = "The \"best\" flag", -- why' '}' | mod_file 101/mods/Addon/42/media/lua/shared/Translate/EN/Sandbox_EN.txt
+  make_mod 102 "Old Mod" OldMod "" "Old Map"
+  make_mod 102 "Old Mod" OldMod backup
+  make_mod 104 Hidden HiddenMod 42
+  printf '%s\n' 'option Hidden.X' '{' 'type = integer,' 'default = 3,' 'translation = Hidden_X,' '}' | mod_file 104/mods/Hidden/42/media/sandbox-options.txt
+  echo '{"Sandbox_Hidden_X": "X",}' | mod_file 104/mods/Hidden/42/media/lua/shared/Translate/EN/Sandbox.json
+  make_mod 106 Loose LooseMod 42.0
+  make_mod 106 Loose LooseMod 42.5
+  # A mod.info without an id still brings its maps and options.
+  make_mod 106 "No Id" "" 42 "No Id Map"
+  printf '%s\n' 'option NoId.X' '{' 'type = integer,' 'default = 3,' '}' | mod_file "106/mods/No Id/42/media/sandbox-options.txt"
+  set_ini_value "${SERVER}/pzserver.ini" Mods '\MultiMod;2392709985\TsarLib; \OldMod;'
+  set_ini_value "${SERVER}/pzserver.ini" Map 'Variant Map;Muldraugh, KY'
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems '101;102;105'
+  cat > "${SERVER}/pzserver_SandboxVars.lua" <<'EOF'
+SandboxVars = {
+    Zombies = 4,
+    Multi = {
+        Mode = 2,
+        CommonOnly = "a \"b\"",
+    },
+    MultiNoDot = false,
+}
+EOF
+
+  (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") || { fail "list-mods failed"; cat "${WORK}/err" >&2; return; }
+  jq -e '.format == 1 and .gameVersion == "42.21.0" and .workshopIds == ["900", "104"]' "${out}" > /dev/null || fail "wrong header"
+  expect_eq "$(jq -c .server "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
+  expect_eq "$(jq -c .collections "${out}")" '[{"id":"900","title":"Item 900","children":["101","910","102"]},{"id":"910","title":"Item 910","children":["103","920"]},{"id":"920","title":"Item 920","children":[]}]'
+  expect_eq "$(jq -c '[.items[] | [.id, .available, .downloaded, (.mods | map(.folder))]]' "${out}")" \
+    '[["101",true,true,["Addon","Multi Version"]],["102",true,true,["Old Mod"]],["103",true,false,[]],["104",false,true,["Hidden"]],["105",true,false,[]],["106",true,true,["Loose","No Id"]]]'
+  expect_eq "$(jq -c '.items[0] | [.title, .description, .tags, .updated, .size, .requiredItems]' "${out}")" '["Item 101","[b]About 101[/b]",["Build 42"],1700000000,4096,null]'
+  expect_eq "$(jq -c '.items[3] | [.title, .description, .tags, .updated, .size]' "${out}")" '[null,null,null,null,null]'
+  expect_eq "$(jq -c '.items[3].mods[0].sandbox | map([.env, .label])' "${out}")" '[["SANDBOX_Hidden__X",null]]'
+  expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox)' "${out}")" \
+    '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"require":["StarlitLibrary","TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
+  expect_eq "$(jq -c '.items[0].mods[1].sandbox | map([.env, .type, .default, .current])' "${out}")" \
+    '[["SANDBOX_Multi__Mode","enum","1","2"],["SANDBOX_Multi__Strength","integer","10",null],["SANDBOX_Multi__Shared","double","1.5",null],["SANDBOX_MultiNoDot","boolean","true","false"],["SANDBOX_Multi__CommonOnly","string","Base.Axe;Base.Saw","a \"b\""]]'
+  expect_eq "$(jq -c '.items[0].mods[1].sandbox[0:2]' "${out}")" \
+    '[{"env":"SANDBOX_Multi__Mode","option":"Multi.Mode","type":"enum","default":"1","min":null,"max":null,"values":["Easy","2","Hard"],"page":"Multi","pageLabel":"Multi settings","label":"Mode","tooltip":null,"current":"2"},{"env":"SANDBOX_Multi__Strength","option":"Multi.Strength","type":"integer","default":"10","min":"-5","max":"50","values":null,"page":"Multi","pageLabel":"Multi settings","label":null,"tooltip":"How strong","current":null}]'
+  expect_eq "$(jq -c '.items[0].mods[1].sandbox[4] | [.page, .pageLabel, .label]' "${out}")" '["Elsewhere",null,null]'
+  expect_eq "$(jq -c '.items[0].mods[0] | [.id, .versionFolder, .sandbox[0].label, .sandbox[0].values, .sandbox[1].values]' "${out}")" '["MultiAddon","42","The \"best\" flag",null,null]'
+  expect_eq "$(jq -c '.items[1].mods[0] | [.id, .name, .versionFolder, .maps, .sandbox]' "${out}")" '["OldMod","Old Mod",null,[],[]]'
+  expect_eq "$(jq -c '.items[5].mods[0].versionFolder' "${out}")" '"42.5"'
+  expect_eq "$(jq -c '.items[5].mods[1] | [.id, .versionFolder, .maps, [.sandbox[].env]]' "${out}")" '[null,"42",["No Id Map"],["SANDBOX_NoId__X"]]'
+  [ -s "${WORK}/err" ] && fail "list-mods wrote to stderr: $(cat "${WORK}/err")"
+
+  # Each collection is looked up once, also when it is given twice.
+  rm "${HOMEDIR}/steam-calls"
+  PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" --tree '900;;900' > /dev/null || fail "the resolver failed on an empty entry"
+  expect_eq "$(paste -sd ' ' "${HOMEDIR}/steam-calls")" "GetCollectionDetails 1 GetCollectionDetails 1 GetCollectionDetails 1"
+  expect_eq "$(PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='900;900' bash "${SCRIPT_DIR}/list_mods.sh" | jq -c '[.collections[].id]')" '["900","910","920"]'
+
+  # Required items need a key, and the API takes at most 100 IDs per call.
+  rm "${HOMEDIR}/steam-calls"
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems "$(seq -s ';' 1000 1150)"
+  PATH="${WORK}/bin:${PATH}" STEAM_API_KEY=secret bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed with a key"
+  expect_eq "$(jq -c '[.items[] | select(.id | length == 3) | .requiredItems]' "${out}")" '[["102"],[],[],[]]'
+  expect_eq "$(jq -c '[.items[].id] | length' "${out}")" 155
+  expect_eq "$(paste -sd ' ' "${HOMEDIR}/steam-calls")" "GetPublishedFileDetails 100 GetDetails 100 GetPublishedFileDetails 55 GetDetails 55"
+  (PATH="${WORK}/bin:${PATH}" STEAM_API_KEY=wrong bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded with a wrong key"
+  [ -s "${out}" ] && fail "list-mods printed output with a wrong key"
+  grep -q '^Error: .*STEAM_API_KEY' "${WORK}/err" || fail "the wrong key was not explained"
+
+  # Build 41 loads the mod.info in the mod folder itself.
+  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed on Build 41"
+  expect_eq "$(jq -c '[.gameVersion, (.items[] | select(.id | length == 3) | .mods[] | [.folder, .versionFolder, .modVersion, .maps])]' "${out}")" \
+    '["41.78.16",["Addon",null,null,[]],["Multi Version","","41",[]],["Old Mod","",null,["Old Map"]],["Hidden",null,null,[]],["Loose",null,null,[]],["No Id",null,null,[]]]'
+
+  # Nothing to look up needs no network.
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems ''
+  rm -rf "${STEAMAPPDIR}/steamapps/workshop" "${HOMEDIR}/steam-calls"
+  PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed without items"
+  jq -e '.items == [] and .collections == [] and .workshopIds == []' "${out}" > /dev/null || fail "list-mods without items printed $(cat "${out}")"
+  [ -f "${HOMEDIR}/steam-calls" ] && fail "list-mods called the Steam API without items"
+
+  (PATH="${WORK}/bin:${PATH}" FAKE_STEAM_DOWN=1 WORKSHOP_IDS=900 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without the Steam API"
+  [ -s "${out}" ] && fail "list-mods printed output without the Steam API"
+  grep -q '^Error: could not resolve WORKSHOP_IDS' "${WORK}/err" || fail "the Steam API failure was not explained"
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems 101
+  (PATH="${WORK}/bin:${PATH}" FAKE_STEAM_DOWN=1 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without the item details"
+  [ -s "${out}" ] && fail "list-mods printed output without the item details"
+  grep -q '^Error: could not get the workshop item details' "${WORK}/err" || fail "the details failure was not explained"
+
+  rm "${HOMEDIR}/Zomboid/server-console.txt"
+  (PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without a game version"
+  grep -q 'Start the server once first' "${WORK}/err" || fail "the unknown game version was not explained"
+}
+
+test_mod_warnings() {
+  TEST=warnings
+  new_env
+  local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600"
+  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  printf '%s\r\n' 'id=ModA' 'require=\ModB' 'loadModAfter=ModC,\ModB' 'incompatible=\ModD' | mod_file 201/mods/A/42/mod.info
+  make_mod 202 B ModB 42
+  printf '%s\n' 'id=ModC' 'loadModBefore=\ModE' | mod_file 203/mods/C/42.21/mod.info
+  printf '%s\n' 'id=ModD' 'incompatible=ModA' | mod_file 204/mods/D/42/mod.info
+  make_mod 205 E ModE 42
+  printf '%s\n' 'id=ModF' 'require=2392709985\ModMissing,\ModMissing' | mod_file 206/mods/F/42/mod.info
+  # Not loaded on 42.21, so its mod.info doesn't count.
+  printf '%s\n' 'id=ModG' 'require=ModMissing' | mod_file 207/mods/G/42.30/mod.info
+  # Mods placed by hand in Zomboid/mods, for Build 42 and for Build 41.
+  mkdir -p "${HOMEDIR}/Zomboid/mods/My Local/42" "${HOMEDIR}/Zomboid/mods/Old Local"
+  printf '%s\r\n' 'id=ModLocal' 'require=\ModB' > "${HOMEDIR}/Zomboid/mods/My Local/42/mod.info"
+  printf '%s\r\n' 'id=ModLocal41' > "${HOMEDIR}/Zomboid/mods/Old Local/mod.info"
+
+  set_ini_value "${ini}" WorkshopItems '201;202;203;204;205;206;207'
+  set_ini_value "${ini}" Mods '\ModB;\ModC;\ModA;\ModE;\ModG;\ModLocal;\ModLocal41'
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  [ -s "${WORK}/err" ] && fail "warned about mods in order: $(cat "${WORK}/err")"
+
+  # Each problem once, also for mods listed twice.
+  set_ini_value "${ini}" Mods '\ModA;2392709985\ModB;\ModE;\ModC;\ModD;\ModF;\Ghost;\ModA;\ModF;\Ghost;\ModLocal'
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  expect_line "${WORK}/err" 'Warning: Mods= lists ModA before ModB, which it requires.'
+  expect_line "${WORK}/err" 'Warning: Mods= lists ModA before ModC, but its mod.info says to load it after ModC.'
+  expect_line "${WORK}/err" 'Warning: ModA and ModD are both in Mods=, but the mod.info of ModA says they are incompatible.'
+  expect_line "${WORK}/err" 'Warning: Mods= lists ModC after ModE, but its mod.info says to load it before ModE.'
+  expect_line "${WORK}/err" 'Warning: ModF requires ModMissing, which is not in Mods=.'
+  expect_line "${WORK}/err" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
+  expect_eq "$(wc -l < "${WORK}/err")" 6
+
+  # Items download while the server starts, so a new item's mods may not be there yet.
+  set_ini_value "${ini}" WorkshopItems '201;202;203;204;205;206;207;299'
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  grep -q Ghost "${WORK}/err" && fail "missing mods were reported while an item was not downloaded"
+  expect_eq "$(wc -l < "${WORK}/err")" 5
+
+  # The mod.info of a mod in Zomboid/mods is checked too.
+  set_ini_value "${ini}" Mods '\ModLocal;\ModB'
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  expect_eq "$(cat "${WORK}/err")" 'Warning: Mods= lists ModLocal before ModB, which it requires.'
+
+  # A `<workshop id>\` prefix picks the copy of a mod ID that two items have. Without one, the first
+  # copy counts. A requirement both copies have is reported once.
+  printf '%s\n' 'id=ModX' 'require=\Dep,\Shared' 'incompatible=\ModB' | mod_file 301/mods/X/42/mod.info
+  printf '%s\n' 'id=ModX' 'require=\Need,\Shared' | mod_file 302/mods/X/42/mod.info
+  set_ini_value "${ini}" WorkshopItems '202;301;302'
+  set_ini_value "${ini}" Mods '302\ModX;\ModB'
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  expect_eq "$(cat "${WORK}/err")" 'Warning: ModX requires Need, which is not in Mods=.
+Warning: ModX requires Shared, which is not in Mods=.'
+  set_ini_value "${ini}" Mods '\ModX;301\ModX;302\ModX;\ModB'
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  expect_line "${WORK}/err" 'Warning: ModX requires Dep, which is not in Mods=.'
+  expect_line "${WORK}/err" 'Warning: ModX requires Need, which is not in Mods=.'
+  expect_line "${WORK}/err" 'Warning: ModX requires Shared, which is not in Mods=.'
+  expect_line "${WORK}/err" 'Warning: ModX and ModB are both in Mods=, but the mod.info of ModX says they are incompatible.'
+  expect_eq "$(wc -l < "${WORK}/err")" 4
+
+  # Without the game version the version folder is unknown, so only missing mods are reported.
+  set_ini_value "${ini}" WorkshopItems '201;202;203;204;205;206;207'
+  set_ini_value "${ini}" Mods '\ModA;2392709985\ModB;\ModE;\ModC;\ModD;\ModF;\Ghost;\ModA;\ModLocal'
+  rm "${HOMEDIR}/Zomboid/server-console.txt"
+  report_mod_problems "${ini}" "${content}" 2> "${WORK}/err"
+  expect_eq "$(cat "${WORK}/err")" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
 }
 
 test_overlaps() {
@@ -217,8 +521,10 @@ test_configure() {
   new_env
   echo 'rcon from file' > "${WORK}/rcon"
   export INI_Password='p&ss|word' INI_RCONPassword=ignored INI_RCONPassword_FILE="${WORK}/rcon" ADMINPASSWORD='p@ss word$USER' \
-    MEMORY=2048m DEBUG=true ADMINUSERNAME=boss PORT=17000 STEAMVAC=TRUE WORKSHOP_IDS=""
-  configure_server > /dev/null 2>&1
+    MEMORY=2048m DEBUG=true ADMINUSERNAME=boss PORT=17000 STEAMVAC=TRUE WORKSHOP_IDS="" INI_Mods='\Ghost'
+  configure_server > /dev/null 2> "${WORK}/err"
+  # The startup warnings check the Mods= of this start.
+  expect_line "${WORK}/err" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
   expect_line "${SERVER}/pzserver.ini" 'Password=p&ss|word'
   expect_line "${SERVER}/pzserver.ini" 'RCONPassword=rcon from file'
   expect_line "${SERVER}/pzserver.ini" 'WorkshopItems='
@@ -340,7 +646,7 @@ EOF
   expect_line "${HOMEDIR}/args" "-servername"
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_workshop test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_workshop test_list_mods test_mod_warnings test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

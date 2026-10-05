@@ -66,12 +66,14 @@ build="$(sed -n "s/^Game: ${branch} branch, build \([0-9][0-9]*\)$/\1/p" <<< "${
 ${game_lines:-none}"
 # The server logs its version at startup; java.version and the like are not it.
 version="$(docker logs "${name}" 2>&1 | grep -oE '(versionNumber=|[[:space:]>]version=|ZNet: Startup version )[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | sed 's/.*[= ]//' || true)"
+# list-mods reads it from Zomboid/server-console.txt the same way.
+[ -n "${version}" ] || fail "the log does not show the game version, so list-mods can't find it either"
 case "${branch}" in
   public) channel=stable ;;
   unstable) channel=beta ;;
   *) channel="(${branch} branch)" ;;
 esac
-label="${version:-build ${build}} ${channel}"
+label="${version} ${channel}"
 echo "Installed ${label}, build ${build}"
 
 docker exec "${name}" grep -qx 'PublicName=Boot test' "${home}/Server/pzserver.ini" \
@@ -98,6 +100,10 @@ jq -R -s --arg label "${label}" --arg release "${release}" '
   | map(select(length > 0) | split("\t") | {kind: .[0], name: .[1], description: (.[3] // "")})
   | {label: $label, release: $release, vars: .}
 ' <<< "${rows}" > "${out_dir}/${branch}-${build}.json"
+
+mods_json="$(docker exec "${name}" list-mods)" || fail "list-mods failed"
+jq -e --arg version "${version}" '.format == 1 and .items == [] and .gameVersion == $version' <<< "${mods_json}" >/dev/null \
+  || fail "list-mods did not describe a server without mods on game version ${version}: ${mods_json}"
 
 stop_server 1
 

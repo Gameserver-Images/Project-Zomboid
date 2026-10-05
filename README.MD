@@ -77,6 +77,8 @@ Every restart brings the game up to date, which matters because updated clients 
 
 Maps from enabled mods are added to the `Map=` line automatically, before the vanilla map, with their spawn points. Since downloads happen while the server starts, a new map is added on the start after the one that downloaded it. Taking a map mod out of `INI_Mods` removes its maps again.
 
+`docker exec <container> list-mods > mods.json` describes your workshop items and every mod in them: requirements, load order hints, maps and sandbox options. Load that file on the [mods page](https://gameserver-images.github.io/Project-Zomboid/mods.html) to pick and order mods and set their sandbox options, then copy the `.env` lines it writes. The log also warns at startup about enabled mods that are missing, lack a required mod, load in the wrong order or conflict.
+
 ## Running the server
 
 * `docker stop` (or stopping it in Portainer) makes the server save the world and quit. `stop_grace_period: 120s` gives it time for that.

@@ -40,6 +40,7 @@ configure_server() {
   local lua_file="${server_dir}/${SERVERNAME}_SandboxVars.lua"
   local spawn_file="${server_dir}/${SERVERNAME}_spawnregions.lua"
   local db_file="${HOMEDIR}/Zomboid/db/${SERVERNAME}.db"
+  local content_dir="${STEAMAPPDIR}/steamapps/workshop/content/108600"
   local admin_password=""
 
   check_locale
@@ -55,7 +56,8 @@ configure_server() {
   apply_ini_env "${ini_file}"
 
   apply_workshop_ids "${ini_file}"
-  apply_mod_maps "${ini_file}" "${spawn_file}" "${STEAMAPPDIR}/steamapps/workshop/content/108600"
+  apply_mod_maps "${ini_file}" "${spawn_file}" "${content_dir}"
+  report_mod_problems "${ini_file}" "${content_dir}"
   apply_sandbox_env "${lua_file}"
 
   # The admin account lives in the server database, so the password is only needed to create it.

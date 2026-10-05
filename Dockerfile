@@ -30,6 +30,7 @@ RUN mkdir -p "${STEAMAPPDIR}" "${HOMEDIR}/Zomboid" \
 COPY --chmod=755 scripts /server/scripts
 # image-env lists the variables the image sets itself, so startup can warn about unknown ones.
 RUN ln -s /server/scripts/list_env.sh /usr/local/bin/list-env \
+  && ln -s /server/scripts/list_mods.sh /usr/local/bin/list-mods \
   && ln -s /server/scripts/console.sh /usr/local/bin/console \
   && env | cut -d= -f1 | sort > /server/scripts/image-env
 
