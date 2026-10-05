@@ -26,7 +26,7 @@ ini_value() {
   # $1 = INI file, $2 = key; prints the value, empty when the key is missing
   KEY="$2" awk '
     BEGIN { k = tolower(ENVIRON["KEY"]) }
-    { i = index($0, "=") }
+    { sub(/\r$/, ""); i = index($0, "=") }
     i > 1 && tolower(substr($0, 1, i - 1)) == k { print substr($0, i + 1); exit }
   ' "$1"
 }

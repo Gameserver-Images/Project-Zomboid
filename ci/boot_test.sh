@@ -102,7 +102,7 @@ jq -R -s --arg label "${label}" --arg release "${release}" '
 ' <<< "${rows}" > "${out_dir}/${branch}-${build}.json"
 
 mods_json="$(docker exec "${name}" list-mods)" || fail "list-mods failed"
-jq -e --arg version "${version}" '.format == 1 and .items == [] and .gameVersion == $version' <<< "${mods_json}" >/dev/null \
+jq -e --arg version "${version}" '.format == 2 and .items == [] and .gameVersion == $version' <<< "${mods_json}" >/dev/null \
   || fail "list-mods did not describe a server without mods on game version ${version}: ${mods_json}"
 
 stop_server 1

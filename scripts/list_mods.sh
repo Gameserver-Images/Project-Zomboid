@@ -79,24 +79,30 @@ fi
 
 mod_info_rows "${version}" "${content_dir}"/*/mods > "${tmp}/mods"
 
-# The files of the mods that load: sandbox options, English translations and maps.
-mod_dirs < "${tmp}/mods" | while IFS=$'\t' read -r item folder rank dir _; do
-  translate="${dir}/media/lua/shared/Translate/EN"
-  if [ -f "${dir}/media/sandbox-options.txt" ]; then
-    printf 'options\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${dir}/media/sandbox-options.txt"
-  fi
-  if [ -f "${translate}/Sandbox.json" ]; then
-    printf 'json\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${translate}/Sandbox.json"
-  elif [ -f "${translate}/Sandbox_EN.txt" ]; then
-    printf 'txt\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${translate}/Sandbox_EN.txt"
-  fi
-  for map_dir in "${dir}"/media/maps/*/; do
-    map_dir="${map_dir%/}"
-    if [ "${map_dir##*/}" != "${VANILLA_MAP}" ]; then
-      printf 'map\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${map_dir##*/}"
+{
+  # The sandbox options and English translations of the mods that load by themselves
+  awk -F '\t' '$4 == 1 && $19 == ""' "${tmp}/mods" | mod_dirs | while IFS=$'\t' read -r item folder rank dir; do
+    translate="${dir}/media/lua/shared/Translate/EN"
+    if [ -f "${dir}/media/sandbox-options.txt" ]; then
+      printf 'options\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${dir}/media/sandbox-options.txt"
+    fi
+    if [ -f "${translate}/Sandbox.json" ]; then
+      printf 'json\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${translate}/Sandbox.json"
+    elif [ -f "${translate}/Sandbox_EN.txt" ]; then
+      printf 'txt\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${translate}/Sandbox_EN.txt"
     fi
   done
-done | LC_ALL=C awk -F '\t' '
+  # The maps of every mod whose mod.info the game reads: like the image, the page takes them out of
+  # Map= when the mod doesn't load.
+  mod_dirs < "${tmp}/mods" | while IFS=$'\t' read -r item folder rank dir; do
+    for map_dir in "${dir}"/media/maps/*/; do
+      map_dir="${map_dir%/}"
+      if [ "${map_dir##*/}" != "${VANILLA_MAP}" ]; then
+        printf 'map\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${map_dir##*/}"
+      fi
+    done
+  done
+} | LC_ALL=C awk -F '\t' '
   function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
   function clean(s) { gsub(/\t/, " ", s); return s }
   # option <name> { key = value, ... }, with /* */ comments. Statements end at commas or braces, not
@@ -230,16 +236,20 @@ jq -n -c \
        tooltip: (if .translation == "" then null else $labels["Sandbox_" + .translation + "_tooltip"] end),
        current: $current[.env | ascii_downcase]};
 
+  # error: why the game does not find the mod. requireEntries: the require entries as the game loads
+  # them, untrimmed and with empty ones.
   ($mods | rows | map((.[0] + "/" + .[1]) as $key | [.[0], {
-      id: (.[4] | text), folder: .[1], versionFolder: (if .[3] == "1" then (if .[2] == "." then "" else .[2] end) else null end),
+      id: (.[4] | text), folder: .[1], versionFolder: (if .[2] == "" then null elif .[2] == "." then "" else .[2] end),
       name: (.[5] | text), description: (.[6] | text), author: (.[7] | text), modVersion: (.[8] | text),
       url: (.[9] | text), category: (.[10] | text), versionMin: (.[11] | text), versionMax: (.[12] | text),
-      require: (.[13] | ids), loadModAfter: (.[14] | ids), loadModBefore: (.[15] | ids), incompatible: (.[16] | ids),
+      error: (if .[3] == "-" then .[18] | text else null end),
+      require: (.[13] | ids), requireEntries: [.[19] // "" | scan("([^,]*),") | .[0]],
+      loadModAfter: (.[14] | ids), loadModBefore: (.[15] | ids), incompatible: (.[16] | ids),
       maps: ($maps[$key] // []), sandbox: [($options[$key] // [])[] | sandbox($labels[$key] // {})]}])
     | group_by(.[0]) | map({key: .[0][0], value: (map(.[1]) | sort_by(.folder))}) | from_entries) as $item_mods
 
   | {
-      format: 1,
+      format: 2,
       gameVersion: $version,
       workshopIds: ($workshop_ids | lines),
       server: {mods: ($server_mods | lines), map: ($server_map | lines), workshopItems: ($server_items | lines)},

@@ -87,7 +87,7 @@
     .meta { color: var(--muted); font-size: 0.85rem; margin: 0 4px 0 8px; }
     .item-title + .badge { margin-left: 8px; }
     .badge { display: inline-block; font-size: 0.76rem; line-height: 1.6; padding: 0 7px; border-radius: 999px; background: var(--code-bg); color: var(--muted); margin: 1px 4px 1px 0; }
-    .badge.warn, .chip.warn { background: var(--warn-bg); color: var(--warn); }
+    .badge.warn { background: var(--warn-bg); color: var(--warn); }
     .badge.bad, .chip.bad { background: var(--bad-bg); color: var(--bad); }
     .chip.ok { color: var(--accent); }
     .mod { margin: 6px 0 0 2px; padding: 4px 0 4px 10px; border-left: 3px solid var(--border); }
@@ -231,14 +231,14 @@
         </section>
 
         <section id="tab-maps" role="tabpanel" aria-labelledby="tab-button-maps" hidden>
-          <p class="hint">The image adds the maps of enabled mods to <code>Map=</code> by itself, before the vanilla map. Include <code>INI_Map</code> only to set their order.</p>
+          <p class="hint">The image adds the maps of the mods that load to <code>Map=</code> by itself, before the vanilla map. Include <code>INI_Map</code> only to set their order.</p>
           <div class="controls"><label><input id="include-map" type="checkbox"> Include <code>INI_Map</code> in the output</label></div>
           <ol id="map-list" class="sortable"></ol>
         </section>
 
         <section id="tab-sandbox" role="tabpanel" aria-labelledby="tab-button-sandbox" hidden>
-          <p class="hint">Settings of the enabled mods. The output lists every value that differs from the mod's default or from the server's current value. Click a variable name to copy it.</p>
-          <p id="sandbox-empty" class="empty" hidden>No enabled mod has sandbox options.</p>
+          <p class="hint">Settings of the enabled mods and the mods they require. The output lists every value that differs from the mod's default or from the server's current value. Click a variable name to copy it.</p>
+          <p id="sandbox-empty" class="empty" hidden>No enabled or required mod has sandbox options.</p>
           <div id="sandbox-list"></div>
         </section>
       </div>
@@ -272,26 +272,31 @@
   const TABS = ['pick', 'order', 'maps', 'sandbox'];
   const HINT_RE = /load (it |this |them )?(after|before|first|last)|load order|requires?|required|dependenc|incompatib|conflict|not compatible|don'?t use with|mod ?id|workshop ?id/i;
   const PROBLEM_KINDS = [
-    ['missing', 'Missing requirements'],
+    ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
+    ['version', () => `Don't load on ${model.gameVersion}`],
     ['order', 'Load order'],
     ['incompatible', 'Incompatible mods'],
-    ['duplicate', 'Mod IDs enabled in two items'],
-    ['version', () => `Don't load on ${model.gameVersion}`],
+    ['duplicate', 'Mod IDs in several items'],
     ['unknown', 'Enabled but not in any downloaded item'],
-    ['uncovered', 'Items missing from WORKSHOP_IDS', 'The image sets WorkshopItems from WORKSHOP_IDS on every start, so these items would no longer be downloaded.'],
+    ['uncovered', () => `Items missing from ${listName()}`, () => (state.workshopIds.length
+      ? 'The image sets WorkshopItems from WORKSHOP_IDS on every start, so these items would no longer be downloaded.'
+      : 'The server reads mods only from the items in WorkshopItems.')],
     ['unavailable', 'Unavailable on the workshop', 'Hidden, private or removed, so the server cannot download or update them. Take them out of the collection or WORKSHOP_IDS.'],
     ['idle', 'Items with no enabled mod'],
+    ['dead', () => `Items with no mod that loads on ${model.gameVersion}`, 'The game skips their mods on this version. Take them out of the collection, or wait for an update.'],
   ];
-  // Shown below the problems and not counted: the server downloads these items while it starts.
+  // Shown below the problems and not counted: items to check again after the server's next start, and items that add nothing.
   const INFO_KINDS = [
-    ['pending', 'Enabled from items not downloaded yet', "These items' descriptions name the mod IDs. The server downloads the items while it starts. Run list-mods again after that to check the mods."],
+    ['pending', 'Mods from items not downloaded yet', "These items' descriptions name the mod IDs. The server downloads the items while it starts. Run list-mods again after that to check the mods."],
     ['notDownloaded', 'Items not downloaded yet', 'The server downloads them while it starts. Run list-mods again after that to see their mods.'],
+    ['empty', 'Downloaded items without mods', 'The game finds no mod.info in them, so they add nothing.'],
   ];
   const $ = id => document.getElementById(id);
 
   let model = null;    // the loaded list-mods JSON, indexed
   let state = null;    // the user's choices, saved in localStorage
   let derived = null;  // recomputed from model and state after every change
+  let view = null;     // the items the server reads mods from, and what it makes of each mod ID
   let remembering = false;
   let pickRefreshers = [];
   let itemNodes = new Map();
@@ -323,6 +328,8 @@
   const text = x => (typeof x === 'string' ? x : null);
   const texts = x => list(x).filter(v => typeof v === 'string');
   const splitList = s => s.split(';').map(v => v.trim()).filter(Boolean);
+  // Mods= the way the server reads it: Build 42 drops every backslash first, so `<workshop id>\ModId` is one ID.
+  const modIds = s => [...new Set(splitList(model.b41 ? s : s.replace(/\\/g, '')))];
   const workshopUrl = id => (/^\d+$/.test(id) ? `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}` : null);
   const webUrl = url => (typeof url === 'string' && /^https?:\/\/\S+$/i.test(url.trim()) ? url.trim() : null);
   const itemTitle = item => item.title || `Workshop item ${item.id}`;
@@ -334,14 +341,12 @@
     items.splice(insertAt > from ? insertAt - 1 : insertAt, 0, moved);
   }
 
-  function compareVersions(a, b) {
-    const pa = a.split('.').map(Number);
-    const pb = b.split('.').map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const d = (pa[i] || 0) - (pb[i] || 0);
-      if (d) return Math.sign(d);
-    }
-    return 0;
+  // A version the way the game compares it: major.minor only, null when the game can't parse it.
+  // A number too big for a Java int reads as 0.
+  function versionNumber(version) {
+    const m = /^(\d+)\.(\d+)/.exec(version);
+    const int = digits => (Number(digits) > 2147483647 ? 0 : Number(digits));
+    return m && int(m[2]) <= 999 ? int(m[1]) * 1000 + int(m[2]) : null;
   }
 
   function formatSize(bytes) {
@@ -395,19 +400,23 @@
   // ---- Model ----
 
   function validate(json) {
-    if (!json || typeof json !== 'object' || Array.isArray(json) || json.format !== 1) {
-      return 'This is not list-mods output: it has no "format": 1. Load what docker exec <container> list-mods prints.';
+    if (json?.format === 1) return 'This list-mods output comes from an older image. Update the image, then run docker exec <container> list-mods again.';
+    if (!json || typeof json !== 'object' || Array.isArray(json) || json.format !== 2) {
+      return 'This is not list-mods output: it has no "format": 2. Load what docker exec <container> list-mods prints.';
     }
     if (typeof json.gameVersion !== 'string' || !json.gameVersion) return 'The file has no gameVersion.';
     if (!Array.isArray(json.items)) return 'The file has no items list.';
     return null;
   }
 
-  function loadProblem(mod, version) {
-    if (mod.versionFolder === null) return `no folder for game ${version}`;
-    if (mod.versionMin && compareVersions(version, mod.versionMin) < 0) return `needs game ${mod.versionMin} or newer`;
-    if (mod.versionMax && compareVersions(version, mod.versionMax) > 0) return `supports the game up to ${mod.versionMax}`;
-    return null;
+  // What the game checks before it loads a mod: that it finds the mod (list-mods says why when it doesn't), versionMin
+  // and versionMax, then that no require entry is empty.
+  function checkProblem(mod, version) {
+    if (mod.error) return mod.error;
+    const game = versionNumber(version);
+    if (mod.versionMin !== null && versionNumber(mod.versionMin) > game) return `needs game ${mod.versionMin} or newer`;
+    if (mod.versionMax !== null && versionNumber(mod.versionMax) < game) return `supports the game up to ${mod.versionMax}`;
+    return mod.requireEntries.some(r => !r.trim()) ? 'its require= has an empty entry' : null;
   }
 
   function sandboxOption(raw) {
@@ -429,7 +438,7 @@
       workshopIds: [...new Set(texts(json.workshopIds))],
       server: { mods: texts(server.mods), map: texts(server.map), workshopItems: texts(server.workshopItems) },
       items: new Map(), collections: new Map(), instances: new Map(), byModId: new Map(), options: new Map(),
-      unknown: new Map(), modMaps: new Set(), categories: new Set(),
+      modMaps: new Set(), categories: new Set(),
     };
     for (const c of list(json.collections)) {
       if (typeof c?.id === 'string') m.collections.set(c.id, { id: c.id, title: text(c.title), children: texts(c.children) });
@@ -445,17 +454,26 @@
       m.items.set(item.id, item);
       for (const rawMod of list(raw.mods)) {
         if (typeof rawMod?.id !== 'string' || !rawMod.id) continue;
-        const key = `${item.id}\\${rawMod.id}`;
+        // An item can hold several folders with the same mod ID.
+        const key = `${item.id}/${typeof rawMod.folder === 'string' ? rawMod.folder : rawMod.id}`;
         if (m.instances.has(key)) continue;
         const mod = {
           id: rawMod.id, versionFolder: text(rawMod.versionFolder), name: text(rawMod.name), author: text(rawMod.author),
           modVersion: text(rawMod.modVersion), url: text(rawMod.url), category: text(rawMod.category),
-          versionMin: text(rawMod.versionMin), versionMax: text(rawMod.versionMax), require: texts(rawMod.require),
-          loadModAfter: texts(rawMod.loadModAfter), loadModBefore: texts(rawMod.loadModBefore),
-          incompatible: texts(rawMod.incompatible), maps: texts(rawMod.maps),
+          versionMin: text(rawMod.versionMin)?.trim() || null, versionMax: text(rawMod.versionMax)?.trim() || null,
+          require: texts(rawMod.require), requireEntries: texts(rawMod.requireEntries), loadModAfter: texts(rawMod.loadModAfter),
+          loadModBefore: texts(rawMod.loadModBefore), incompatible: texts(rawMod.incompatible), maps: texts(rawMod.maps),
+          // Build 41 keeps spaces around an id= value, but the server trims what names a mod, so nothing reaches it.
+          error: text(rawMod.error) ?? (rawMod.id !== rawMod.id.trim() ? "its id= has spaces around it, which the server's Mods= can't match" : null),
           sandbox: list(rawMod.sandbox).filter(o => typeof o?.env === 'string').map(sandboxOption),
         };
-        const inst = { key, id: mod.id, itemId: item.id, item, mod, unknown: false, loadProblem: loadProblem(mod, m.gameVersion) };
+        // The game loads the require entries as written, and one with spaces around it names no mod.
+        const spaced = mod.requireEntries.find(r => r !== r.trim()) ?? null;
+        const check = checkProblem(mod, m.gameVersion);
+        const inst = {
+          key, id: mod.id, itemId: item.id, item, mod, found: !mod.error, checkProblem: check,
+          loadProblem: check || (spaced && `its require= has spaces around ${spaced.trim()}`),
+        };
         item.mods.push(inst);
         m.instances.set(key, inst);
         if (!m.byModId.has(mod.id)) m.byModId.set(mod.id, []);
@@ -467,15 +485,13 @@
       if (!item.downloaded) item.declared = declaredModIds(item.description);
       item.search = [item.id, item.title || '', ...item.declared, ...item.mods.flatMap(inst => [inst.id, inst.mod.name || ''])].join('\n').toLowerCase();
     }
+    // The items not downloaded yet whose description names a mod ID.
     m.declared = new Map();
     for (const item of m.items.values()) {
-      for (const id of item.declared) if (!m.byModId.has(id) && !m.declared.has(id)) m.declared.set(id, item);
+      for (const id of item.declared) m.declared.set(id, [...m.declared.get(id) || [], item]);
     }
+    m.declaredOnly = [...m.declared.keys()].filter(id => !m.byModId.has(id)).length;
     buildTree(m);
-    // A mod ID in several items: prefer the copy that is in the pack and loads.
-    for (const insts of m.byModId.values()) {
-      insts.sort((a, b) => (m.pack.has(b.itemId) - m.pack.has(a.itemId)) || (!b.loadProblem - !a.loadProblem));
-    }
     return m;
   }
 
@@ -526,49 +542,90 @@
     m.workshopIds.forEach(walk);
   }
 
-  // `\ModId`, `<workshop id>\ModId` (any number of backslashes) or a plain B41 `ModId`.
-  function resolveEntry(entry) {
-    const parts = entry.split(/\\+/).map(part => part.trim());
-    const id = parts.pop();
-    if (!id) return null;
-    const workshopId = parts.find(Boolean) || '';
-    const candidates = model.byModId.get(id) || [];
-    return (candidates.find(inst => inst.itemId === workshopId) || candidates[0])?.key ?? `${workshopId}\\${id}`;
+  // ---- What the server makes of a mod ID ----
+
+  // The server reads mods from the items in WorkshopItems, in that order, and the image rewrites WorkshopItems
+  // from WORKSHOP_IDS, sorted, on every start.
+  function newView() {
+    const items = new Set();
+    for (const id of state.workshopIds) for (const itemId of model.collectionItems.get(id) || [id]) items.add(itemId);
+    const rank = new Map();
+    for (const id of state.workshopIds.length ? [...items].sort() : model.server.workshopItems) if (!rank.has(id)) rank.set(id, rank.size);
+    return { rank, entries: new Map(), failures: new Map(), alone: new Map() };
   }
 
-  function instance(key) {
-    let inst = model.instances.get(key) || model.unknown.get(key);
-    if (!inst) {
-      const cut = key.indexOf('\\');
-      const id = key.slice(cut + 1);
-      const itemId = key.slice(0, cut);
-      // A mod of an item that is not downloaded yet, when the item's description names it.
-      const named = model.items.get(itemId);
-      const item = named?.declared.includes(id) ? named : model.declared.get(id) || null;
-      inst = { key, id, itemId, item, mod: null, unknown: true, loadProblem: null };
-      model.unknown.set(key, inst);
-    }
-    return inst;
+  const listName = () => (state.workshopIds.length ? 'WORKSHOP_IDS' : 'WorkshopItems');
+
+  // found: the copy the game uses, the first one it finds; notFound: the server's items have the ID, but the game
+  // finds none of their copies; pending: an item the server downloads names it; unseen: only items the server
+  // doesn't read have it; unknown: no item has it.
+  function resolve(id) {
+    let entry = view.entries.get(id);
+    if (entry) return entry;
+    const seen = item => view.rank.has(item.id);
+    const copies = model.byModId.get(id) || [];
+    const ours = copies.filter(inst => seen(inst.item)).sort((a, b) => view.rank.get(a.itemId) - view.rank.get(b.itemId));
+    const usable = ours.filter(inst => inst.found);
+    const declared = model.declared.get(id) || [];
+    const pending = declared.find(seen);
+    if (usable.length) entry = { id, status: 'found', inst: usable[0], item: usable[0].item, copies: usable };
+    else if (ours.length) entry = { id, status: 'notFound', inst: ours[0], item: ours[0].item };
+    else if (pending) entry = { id, status: 'pending', inst: null, item: pending };
+    else if (copies.length || declared.length) entry = { id, status: 'unseen', inst: copies[0] || null, item: copies[0]?.item || declared[0] };
+    else entry = { id, status: 'unknown', inst: null, item: null };
+    view.entries.set(id, entry);
+    return entry;
   }
 
-  // Where a mod ID that is not enabled can come from: a downloaded mod (candidate), else a
-  // not downloaded item whose description names it (declared).
-  function source(id, from) {
-    const candidate = candidateFor(id, from);
-    const declared = candidate ? null : model.declared.get(id) || null;
-    return { candidate, declared, key: candidate?.key ?? (declared ? `\\${id}` : null) };
+  // Why a required mod ID doesn't load, as words that follow "which", without what it requires itself.
+  function blocker(entry) {
+    if (entry.status === 'found' || entry.status === 'notFound') return entry.inst.checkProblem && `doesn't load: ${entry.inst.checkProblem}`;
+    if (entry.status === 'unseen') return `is only in ${itemTitle(entry.item)}, which is not in ${listName()}`;
+    return entry.status === 'unknown' ? 'no item in the pack has' : null;
   }
 
-  function candidateFor(id, from) {
-    const candidates = model.byModId.get(id) || [];
-    return candidates.find(inst => from && inst.itemId === from.itemId) || candidates[0] || null;
+  // The game loads a mod only if it finds every mod it requires, directly or not, and each fits the game version.
+  // Like the game, each required ID is checked once, so a cycle ends.
+  function requireFailure(inst) {
+    if (view.failures.has(inst.id)) return view.failures.get(inst.id);
+    const seen = new Set([inst.id]);
+    const walk = mod => {
+      for (const raw of mod.require) {
+        const r = raw.trim();
+        if (seen.has(r)) continue;
+        seen.add(r);
+        const entry = resolve(r);
+        const why = blocker(entry) || (entry.status === 'found' ? walk(entry.inst.mod) : null);
+        if (why) return `requires ${r}, which ${why}`;
+      }
+      return null;
+    };
+    const failure = walk(inst.mod);
+    view.failures.set(inst.id, failure);
+    return failure;
+  }
+
+  // Why the game won't try to load a mod ID it finds (ChooseGameInfo.getAvailableModDetails); null when it tries.
+  function loadFailure(entry) {
+    if (entry.status === 'notFound') return entry.inst.loadProblem;
+    return entry.status === 'found' ? entry.inst.checkProblem || requireFailure(entry.inst) : null;
+  }
+
+  // The mod ID an unknown Mods= entry was probably meant to be: Build 42 reads `<workshop id>\ModId` as
+  // `<workshop id>ModId`, Build 41 keeps the backslash.
+  function meantId(id) {
+    const known = rest => rest && rest !== id && (model.byModId.has(rest) || model.declared.has(rest));
+    if (model.b41) return known(id.slice(id.lastIndexOf('\\') + 1)) ? id.slice(id.lastIndexOf('\\') + 1) : null;
+    const digits = /^\d+/.exec(id)?.[0].length || 0;
+    for (let cut = digits; cut > 0; cut--) if (known(id.slice(cut))) return id.slice(cut);
+    return null;
   }
 
   // ---- State ----
 
   function initialState() {
     return {
-      order: [...new Set(model.server.mods.map(resolveEntry).filter(Boolean))],
+      mods: modIds(model.server.mods.join(';')),
       values: {},
       bandMode: 'collection',
       bandOrder: { collection: [], category: [] },
@@ -584,7 +641,7 @@
   function restoredState(saved) {
     const s = initialState();
     if (!saved || typeof saved !== 'object') return s;
-    if (Array.isArray(saved.order)) s.order = [...new Set(texts(saved.order).filter(key => key.includes('\\')))];
+    if (Array.isArray(saved.mods)) s.mods = [...new Set(texts(saved.mods).filter(Boolean))];
     const values = saved.values && typeof saved.values === 'object' ? saved.values : {};
     for (const [env, value] of Object.entries(values)) if (typeof value === 'string' && model.options.has(env)) s.values[env] = value;
     if (saved.bandMode === 'category') s.bandMode = 'category';
@@ -647,10 +704,10 @@
   // A variable missing from the .env leaves its last value in SandboxVars.lua.
   const needsLine = (o, v) => differs(o, v) || (o.current !== null && differs(o, o.current));
 
-  function bandOf(inst) {
-    if (state.bandMode === 'category') return `k:${inst.mod?.category || ''}`;
-    if (!inst.item) return 'c:?';
-    return `c:${model.bandCollection.get(inst.item.id) || ''}`;
+  function bandOf(entry) {
+    if (state.bandMode === 'category') return `k:${entry.inst?.mod.category || ''}`;
+    if (!entry.item) return 'c:?';
+    return `c:${model.bandCollection.get(entry.item.id) || ''}`;
   }
 
   function bandLabel(band) {
@@ -669,133 +726,191 @@
     return [...saved, ...all.filter(band => !saved.includes(band))];
   }
 
-  function enable(key) {
-    if (state.order.includes(key)) return;
-    const band = bandOf(instance(key));
-    const last = state.order.findLastIndex(other => bandOf(instance(other)) === band);
-    state.order.splice(last < 0 ? state.order.length : last + 1, 0, key);
+  function enable(id) {
+    if (state.mods.includes(id)) return;
+    const band = bandOf(resolve(id));
+    const last = state.mods.findLastIndex(other => bandOf(resolve(other)) === band);
+    state.mods.splice(last < 0 ? state.mods.length : last + 1, 0, id);
   }
 
-  function disable(key) {
-    state.order = state.order.filter(other => other !== key);
+  function disable(id) {
+    state.mods = state.mods.filter(other => other !== id);
   }
 
   // ---- Derived checks ----
 
-  function derive() {
-    const order = state.order.map(instance);
-    const enabledById = new Map();
-    order.forEach((inst, i) => {
-      if (!enabledById.has(inst.id)) enabledById.set(inst.id, []);
-      enabledById.get(inst.id).push(i);
-    });
-    const bands = bandOrder();
-    const bandOfKey = new Map(order.map(inst => [inst.key, bandOf(inst)]));
-    const firstOfBand = new Map();
-    order.forEach((inst, i) => { if (!firstOfBand.has(bandOfKey.get(inst.key))) firstOfBand.set(bandOfKey.get(inst.key), i); });
-    const covered = new Set();
-    for (const id of state.workshopIds) for (const itemId of model.collectionItems.get(id) || [id]) covered.add(itemId);
-    const notes = order.map(() => []);
-    const p = Object.fromEntries([...PROBLEM_KINDS, ...INFO_KINDS].map(([kind]) => [kind, []]));
-    const at = i => `#${i + 1}`;
-    const pairs = new Set();
-    const uncovered = new Set();
+  // Like the server (ZomboidFileSystem.loadMods): each Mods= entry in order, after the mods it requires, which load even
+  // when Mods= doesn't list them. A required mod that loads stays loaded when a later one fails. A mod that requires
+  // itself, directly or not, sends the game round in circles until the server stops. stopped says why a mod the game
+  // tries to load fails anyway, as words that follow "which".
+  function simulate(ids) {
+    const loaded = [];
+    const loadedWith = new Map();
+    const loops = new Map();
+    const stopped = new Map();
+    const stack = [];
+    // False when the mod loads.
+    const load = (id, from) => {
+      if (loadedWith.has(id)) return false;
+      if (stack.includes(id)) {
+        const chain = stack.map((other, i) => (i === 0 ? other : `${i === 1 ? ' requires' : ', which requires'} ${other}`)).join('');
+        const end = stack.at(-1) === id ? `${stack.length === 1 ? '' : ', which'} requires itself` : `, which requires ${id}`;
+        if (!loops.has(from)) loops.set(from, `${chain}${end}`);
+        return true;
+      }
+      const entry = resolve(id);
+      if (entry.status === 'found' && !loadFailure(entry)) {
+        const { mod, loadProblem } = entry.inst;
+        stack.push(id);
+        const stop = mod.requireEntries.findIndex(r => r !== r.trim());
+        const failed = (stop < 0 ? mod.requireEntries : mod.requireEntries.slice(0, stop)).find(r => load(r, from));
+        stack.pop();
+        if (failed !== undefined && stopped.has(failed)) stopped.set(id, `requires ${failed}, which ${stopped.get(failed)}`);
+        else if (failed === undefined && stop >= 0) stopped.set(id, `doesn't load: ${loadProblem}`);
+        if (failed !== undefined || stop >= 0) return true;
+      } else if (entry.status !== 'pending') {
+        return true;
+      }
+      loadedWith.set(id, from);
+      loaded.push(entry);
+      return false;
+    };
+    for (const id of ids) load(id, id);
+    return { loaded, loadedWith, loops, stopped };
+  }
 
-    order.forEach((inst, i) => {
-      const note = (level, line, enableKey) => notes[i].push({ level, text: line, enable: enableKey });
-      const go = () => goToMod(inst.key);
-      const checkCovered = () => {
-        if (!state.workshopIds.length || covered.has(inst.item.id)) return;
-        note('warn', `its item ${inst.item.id} is not in WORKSHOP_IDS, so the server drops it from WorkshopItems`);
-        if (!uncovered.has(inst.item.id)) {
-          uncovered.add(inst.item.id);
-          p.uncovered.push({ text: itemTitle(inst.item), go });
+  // Why a mod ID doesn't load even when it is the only one in Mods=, as words that follow "which"; null when it does.
+  function failureAlone(id) {
+    const entry = resolve(id);
+    const failure = blocker(entry) || (entry.status === 'found' ? requireFailure(entry.inst) : null);
+    if (failure || entry.status !== 'found') return failure;
+    if (!view.alone.has(id)) {
+      const { loadedWith, loops, stopped } = simulate([id]);
+      view.alone.set(id, loadedWith.has(id) ? null : loops.has(id) ? `stops the server: ${loops.get(id)}` : stopped.get(id));
+    }
+    return view.alone.get(id);
+  }
+
+  function derive() {
+    view = newView();
+    const rows = state.mods.map(resolve);
+    const rowOf = new Map(state.mods.map((id, i) => [id, i]));
+    const bands = bandOrder();
+    const bandOfId = new Map(rows.map(entry => [entry.id, bandOf(entry)]));
+    const firstOfBand = new Map();
+    rows.forEach((entry, i) => { if (!firstOfBand.has(bandOfId.get(entry.id))) firstOfBand.set(bandOfId.get(entry.id), i); });
+    const notes = rows.map(() => []);
+    const p = Object.fromEntries([...PROBLEM_KINDS, ...INFO_KINDS].map(([kind]) => [kind, []]));
+    const at = id => (rowOf.has(id) ? ` (#${rowOf.get(id) + 1})` : '');
+    const goTo = id => () => goToMod(id);
+
+    const { loaded, loadedWith, loops, stopped } = simulate(state.mods);
+    const loadPos = new Map(loaded.map((entry, i) => [entry.id, i]));
+
+    const uncovered = new Set();
+    const pendingRequired = new Set();
+    rows.forEach((entry, i) => {
+      const note = (level, line, enableId) => notes[i].push({ level, text: line, enable: enableId });
+      const go = goTo(entry.id);
+      if (entry.status === 'unknown') {
+        const meant = meantId(entry.id);
+        const enableId = meant && !rowOf.has(meant) ? meant : null;
+        note('bad', meant ? `not in any downloaded item: ${model.b41 ? 'Build 41 keeps the backslash in the ID' : 'the server reads a workshop ID in front as part of the mod ID'}, so this is not ${meant}` : 'not in any downloaded item', enableId);
+        p.unknown.push({ text: entry.id, go, enable: enableId });
+      } else if (entry.status === 'unseen') {
+        note('warn', `its item ${entry.item.id} is not in ${listName()}, so the server does not read it`);
+        if (!uncovered.has(entry.item.id)) {
+          uncovered.add(entry.item.id);
+          p.uncovered.push({ text: itemTitle(entry.item), go });
         }
-      };
-      if (inst.unknown) {
-        const name = inst.itemId ? `${inst.itemId}\\${inst.id}` : inst.id;
-        if (inst.item) {
-          note('warn', `not downloaded yet: ${itemTitle(inst.item)} names this mod ID in its description`);
-          p.pending.push({ text: `${name}: in ${itemTitle(inst.item)}`, go });
-          checkCovered();
-        } else {
-          note('bad', 'not in any downloaded item');
-          p.unknown.push({ text: name, go });
+      } else if (entry.status === 'pending') {
+        note('warn', `not downloaded yet: ${itemTitle(entry.item)} names this mod ID in its description`);
+        p.pending.push({ text: `${entry.id}: in ${itemTitle(entry.item)}`, go });
+      } else if (loops.has(entry.id)) {
+        note('bad', `stops the server: ${loops.get(entry.id)}`);
+        p.loop.push({ text: loops.get(entry.id), go });
+      } else if (!loadPos.has(entry.id)) {
+        // stopped holds words that follow "which"; a mod's own error reads without the "doesn't load: ".
+        const why = loadFailure(entry) || stopped.get(entry.id).replace(/^doesn't load: /, '');
+        note('bad', `doesn't load on ${model.gameVersion}: ${why}`);
+        p.version.push({ text: `${entry.id}: ${why}`, go });
+      } else {
+        for (const raw of entry.inst.mod.require) {
+          const r = raw.trim();
+          if (rowOf.has(r)) continue;
+          const required = resolve(r);
+          if (required.status !== 'pending') {
+            note('muted', `requires ${r}, which loads with it`, r);
+          } else {
+            note('warn', `requires ${r}, which is in ${itemTitle(required.item)}, not downloaded yet`, r);
+            if (!pendingRequired.has(r)) {
+              pendingRequired.add(r);
+              p.pending.push({ text: `${r}: in ${itemTitle(required.item)}, required by ${entry.id}`, go });
+            }
+          }
         }
-        return;
       }
-      const { mod } = inst;
-      if (inst.loadProblem) {
-        note('bad', `doesn't load on ${model.gameVersion}: ${inst.loadProblem}`);
-        p.version.push({ text: `${inst.id}: ${inst.loadProblem}`, go });
-      }
-      for (const r of mod.require) {
-        const found = enabledById.get(r);
-        if (!found) {
-          const { candidate, declared, key } = source(r, inst);
-          const where = candidate ? 'which is off' : declared ? `which is in ${itemTitle(declared)} (not downloaded yet)` : 'which no item in the pack has';
-          note('bad', `requires ${r}, ${where}`, key);
-          const status = candidate ? 'available but off' : declared ? `in ${itemTitle(declared)}, not downloaded yet` : 'not found in the pack';
-          p.missing.push({ text: `${inst.id} requires ${r}: ${status}`, go, enable: key });
-          continue;
-        }
-        const later = found.filter(j => j > i);
-        if (later.length) {
-          note('bad', `requires ${r}, which loads later (${at(later[0])})`);
-          p.order.push({ text: `${inst.id} loads before ${r}, which it requires`, go });
-        }
-      }
+      if (entry.copies?.length > 1) note('warn', `also in ${entry.copies.slice(1).map(inst => itemTitle(inst.item)).join(', ')}; the game uses the copy in ${itemTitle(entry.item)}`);
+    });
+
+    // Advice for the in-game sorter, among the mods that load; the server itself loads in the order above.
+    const noteOn = (id, level, line) => { if (rowOf.has(id)) notes[rowOf.get(id)].push({ level, text: line }); };
+    const pairs = new Set();
+    loaded.forEach((entry, i) => {
+      const mod = entry.inst?.mod;
+      if (!mod) return;
+      const go = goTo(rowOf.has(entry.id) ? entry.id : loadedWith.get(entry.id));
       for (const after of mod.loadModAfter) {
-        const later = (enabledById.get(after) || []).filter(j => j > i);
-        if (later.length) {
-          note('warn', `should load after ${after} (${at(later[0])})`);
-          p.order.push({ text: `${inst.id} should load after ${after}`, go });
-        }
+        if (!(loadPos.get(after) > i)) continue;
+        noteOn(entry.id, 'warn', `should load after ${after}${at(after)}`);
+        p.order.push({ text: `${entry.id} should load after ${after}`, go });
       }
       for (const before of mod.loadModBefore) {
-        const earlier = (enabledById.get(before) || []).filter(j => j < i);
-        if (earlier.length) {
-          note('warn', `should load before ${before} (${at(earlier[0])})`);
-          p.order.push({ text: `${inst.id} should load before ${before}`, go });
-        }
+        if (!(loadPos.get(before) < i)) continue;
+        noteOn(entry.id, 'warn', `should load before ${before}${at(before)}`);
+        p.order.push({ text: `${entry.id} should load before ${before}`, go });
       }
       for (const other of mod.incompatible) {
-        for (const j of enabledById.get(other) || []) {
-          const pair = `${Math.min(i, j)}:${Math.max(i, j)}`;
-          if (j === i || pairs.has(pair)) continue;
-          pairs.add(pair);
-          note('bad', `incompatible with ${other} (${at(j)})`);
-          notes[j].push({ level: 'bad', text: `incompatible with ${inst.id} (${at(i)})` });
-          p.incompatible.push({ text: `${inst.id} and ${other}`, go });
-        }
+        const j = loadPos.get(other);
+        const pair = `${Math.min(i, j)}:${Math.max(i, j)}`;
+        if (j === undefined || j === i || pairs.has(pair)) continue;
+        pairs.add(pair);
+        noteOn(entry.id, 'bad', `incompatible with ${other}${at(other)}`);
+        noteOn(other, 'bad', `incompatible with ${entry.id}${at(entry.id)}`);
+        p.incompatible.push({ text: `${entry.id} and ${other}`, go });
       }
-      const twins = enabledById.get(inst.id).filter(j => j !== i);
-      if (twins.length) note('warn', `${inst.id} is also enabled from ${twins.map(j => order[j].item ? itemTitle(order[j].item) : order[j].itemId).join(', ')}`);
-      checkCovered();
     });
-    for (const [id, positions] of enabledById) {
-      if (positions.length > 1) p.duplicate.push({ text: `${id} in items ${positions.map(j => order[j].itemId).join(', ')}`, go: () => goToMod(order[positions[0]].key) });
+    const used = new Set([...state.mods, ...loadPos.keys()]);
+    for (const id of used) {
+      const { copies, item } = resolve(id);
+      if (copies?.length > 1) {
+        const titles = copies.map(inst => itemTitle(inst.item));
+        p.duplicate.push({ text: `${id} is in ${titles.slice(0, -1).join(', ')} and ${titles.at(-1)}; the game uses ${itemTitle(item)}'s`, go: goTo(rowOf.has(id) ? id : loadedWith.get(id)) });
+      }
     }
-    const enabledItems = new Set(order.filter(inst => !inst.unknown).map(inst => inst.itemId));
     for (const id of model.pack) {
       const item = model.items.get(id);
       const go = () => goToItem(id);
       if (!item.available) p.unavailable.push({ text: itemTitle(item), go });
       else if (!item.downloaded) p.notDownloaded.push({ text: itemTitle(item), go });
-      else if (!enabledItems.has(id)) p.idle.push({ text: itemTitle(item), go });
+      else if (!item.mods.length) p.empty.push({ text: itemTitle(item), go });
+      else if (item.mods.every(inst => inst.loadProblem)) p.dead.push({ text: itemTitle(item), go });
+      else if (!item.mods.some(inst => used.has(inst.id))) p.idle.push({ text: itemTitle(item), go });
     }
-    derived = { order, pos: new Map(order.map((inst, i) => [inst.key, i])), enabledById, bands, bandOfKey, firstOfBand, notes, problems: p };
-    derived.maps = mapList(order);
+    // Sandbox options: the mods that load, then the enabled ones that don't.
+    const modsWithOptions = [...loaded, ...rows.filter(entry => !loadPos.has(entry.id))].map(entry => entry.inst).filter(inst => inst?.mod.sandbox.length);
+    derived = { rows, rowOf, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions };
+    derived.maps = mapList(loaded);
     derived.output = output();
   }
 
-  // Mirrors the image: keep the admin's Map= order, drop maps of mods that are off, add new ones before the vanilla map.
-  function mapList(order) {
+  // Mirrors the image: keep the admin's Map= order, drop maps of mods that don't load, add new ones before the vanilla map.
+  function mapList(loaded) {
     const fromMods = new Map();
-    for (const inst of order) {
-      for (const name of inst.mod?.maps || []) {
+    for (const entry of loaded) {
+      for (const name of entry.inst?.mod.maps || []) {
         if (!fromMods.has(name)) fromMods.set(name, []);
-        fromMods.get(name).push(inst.id);
+        fromMods.get(name).push(entry.id);
       }
     }
     const names = [];
@@ -812,21 +927,13 @@
   function output() {
     const lines = [];
     if (state.workshopIds.length) lines.push(`WORKSHOP_IDS=${state.workshopIds.join(';')}`);
-    const order = derived.order;
-    const mods = model.b41
-      ? [...new Set(order.map(inst => inst.id))]
-      : order.map(inst => {
-        // The item ID picks the copy of a mod ID that several items have.
-        const ambiguous = derived.enabledById.get(inst.id).length > 1 || model.byModId.get(inst.id)?.length > 1;
-        return `${ambiguous || inst.unknown ? inst.itemId : ''}\\${inst.id}`;
-      });
-    lines.push(`INI_Mods=${mods.join(';')}`);
+    lines.push(`INI_Mods=${state.mods.map(id => (model.b41 ? id : `\\${id}`)).join(';')}`);
     if (state.includeMap) lines.push(`INI_Map=${derived.maps.map(entry => entry.name).join(';')}`);
     const seen = new Set();
     let changed = 0;
     let skipped = 0;
-    for (const inst of order) {
-      for (const o of inst.mod?.sandbox || []) {
+    for (const inst of derived.modsWithOptions) {
+      for (const o of inst.mod.sandbox) {
         if (seen.has(o.env)) continue;
         seen.add(o.env);
         const v = value(o);
@@ -845,16 +952,16 @@
   // Stable topological sort over requirements and loadModAfter/loadModBefore, ready mods by (band, position).
   // Mods in a cycle keep their current order and are reported.
   function sortedOrder() {
-    const order = derived.order;
-    const n = order.length;
+    const rows = derived.rows;
+    const n = rows.length;
     const edges = Array.from({ length: n }, () => new Set());
-    const ids = derived.enabledById;
-    const edge = (from, to) => { if (from !== to) edges[from].add(to); };
-    order.forEach((inst, i) => {
-      if (!inst.mod) return;
-      for (const r of inst.mod.require) for (const j of ids.get(r) || []) edge(j, i);
-      for (const after of inst.mod.loadModAfter) for (const j of ids.get(after) || []) edge(j, i);
-      for (const before of inst.mod.loadModBefore) for (const j of ids.get(before) || []) edge(i, j);
+    const edge = (from, to) => { if (from !== undefined && to !== undefined && from !== to) edges[from].add(to); };
+    rows.forEach((entry, i) => {
+      if (!entry.inst) return;
+      const pos = id => derived.rowOf.get(id.trim());
+      for (const r of entry.inst.mod.require) edge(pos(r), i);
+      for (const after of entry.inst.mod.loadModAfter) edge(pos(after), i);
+      for (const before of entry.inst.mod.loadModBefore) edge(i, pos(before));
     });
 
     const index = new Array(n).fill(-1);
@@ -890,7 +997,7 @@
     for (let v = 0; v < n; v++) if (index[v] < 0) visit(v);
 
     const rank = new Map(derived.bands.map((band, i) => [band, i]));
-    const priority = components.map(members => Math.min(...members.map(i => rank.get(derived.bandOfKey.get(order[i].key)) * (n + 1) + i)));
+    const priority = components.map(members => Math.min(...members.map(i => rank.get(derived.bandOfId.get(rows[i].id)) * (n + 1) + i)));
     const indegree = new Array(components.length).fill(0);
     const next = components.map(() => new Set());
     for (let v = 0; v < n; v++) {
@@ -902,15 +1009,15 @@
       }
     }
     const ready = components.map((_, c) => c).filter(c => !indegree[c]);
-    const keys = [];
+    const ids = [];
     while (ready.length) {
       let best = 0;
       for (let r = 1; r < ready.length; r++) if (priority[ready[r]] < priority[ready[best]]) best = r;
       const c = ready.splice(best, 1)[0];
-      for (const i of components[c]) keys.push(order[i].key);
+      for (const i of components[c]) ids.push(rows[i].id);
       for (const d of next[c]) if (--indegree[d] === 0) ready.push(d);
     }
-    return { keys, cycles: components.filter(members => members.length > 1).map(members => members.map(i => order[i].id)) };
+    return { ids, cycles: components.filter(members => members.length > 1).map(members => members.map(i => rows[i].id)) };
   }
 
   // ---- Rendering ----
@@ -940,8 +1047,8 @@
   function renderSummary() {
     $('summary-text').textContent = `Game ${model.gameVersion} (Build ${model.b41 ? 41 : 42}) · ${plural(model.items.size, 'workshop item')} · ${plural(model.instances.size, 'mod')}`;
     // Mods= IDs that are in no item can't be ticked in Pick; Problems and Load order count them.
-    $('count-pick').textContent = `${derived.order.filter(inst => inst.item).length}/${model.instances.size + model.declared.size}`;
-    $('count-order').textContent = derived.order.length;
+    $('count-pick').textContent = `${derived.rows.filter(entry => entry.item).length}/${model.byModId.size + model.declaredOnly}`;
+    $('count-order').textContent = derived.rows.length;
     $('count-maps').textContent = derived.maps.length;
     $('count-sandbox').textContent = derived.output.changed ? `${derived.output.changed} changed` : '';
   }
@@ -976,9 +1083,9 @@
     node.classList.add('flash');
   }
 
-  function goToMod(key) {
+  function goToMod(id) {
     switchTab('order');
-    const row = orderRows.get(key);
+    const row = orderRows.get(id);
     if (!row) return;
     flash(row);
     row.focus({ preventScroll: true });
@@ -1007,8 +1114,8 @@
     node.focus({ preventScroll: true });
   }
 
-  function enableButton(key, refocus) {
-    return h('button', { type: 'button', class: 'small', text: 'Enable', 'aria-label': `Enable ${instance(key).id}`, onclick: () => { enable(key); commit(refocus); } });
+  function enableButton(id, refocus) {
+    return h('button', { type: 'button', class: 'small', text: 'Enable', 'aria-label': `Enable ${id}`, onclick: () => { enable(id); commit(refocus); } });
   }
 
   function focusRow(row, action) {
@@ -1044,10 +1151,12 @@
       bulkStatus));
     const details = h('details', { class: 'group' }, h('summary', {}, h('span', { text: g.title }), count), body);
     const refresh = () => {
-      let on = 0;
-      // Mods of an item that is not downloaded yet have no item ID in their key, only in inst.item.
-      for (const inst of derived.order) if (inst.item && g.itemIds.has(inst.item.id)) on++;
-      count.textContent = `${matched ? `${shown} of ` : ''}${plural(g.itemIds.size, 'item')} · ${plural(on, 'mod')} on`;
+      const on = new Set();
+      for (const itemId of g.itemIds) {
+        const item = model.items.get(itemId);
+        for (const id of [...item.mods.map(inst => inst.id), ...item.declared]) if (derived.enabled.has(id)) on.add(id);
+      }
+      count.textContent = `${matched ? `${shown} of ` : ''}${plural(g.itemIds.size, 'item')} · ${plural(on.size, 'mod')} on`;
     };
     refresh();
     pickRefreshers.push(refresh);
@@ -1079,46 +1188,39 @@
   }
 
   // An item's only mod that loads, or the only mod ID the description of a not downloaded item names.
-  function soleKey(item) {
+  function soleId(item) {
     if (item.downloaded) {
       const loadable = item.mods.filter(inst => !inst.loadProblem);
-      return loadable.length === 1 ? loadable[0].key : null;
+      return loadable.length === 1 ? loadable[0].id : null;
     }
-    return item.declared.length === 1 ? candidateFor(item.declared[0], null)?.key ?? `\\${item.declared[0]}` : null;
+    return item.declared.length === 1 ? item.declared[0] : null;
   }
 
   // Turns on the one mod of each item that has nothing on yet, or turns off every mod of the items.
   function bulk(itemIds, on, status) {
-    const before = state.order.slice();
-    const items = new Set(itemIds);
+    const before = state.mods.slice();
+    const own = item => [...item.mods.map(inst => inst.id), ...item.declared];
     let changed = 0;
     const several = [];
     if (on) {
-      const enabledIds = new Set(state.order.map(key => instance(key).id));
       for (const itemId of itemIds) {
         const item = model.items.get(itemId);
-        const own = [...item.mods.map(inst => inst.id), ...item.declared];
-        if (own.some(id => enabledIds.has(id))) continue;
-        const key = soleKey(item);
-        if (!key) {
-          if (own.length > 1) several.push(item);
+        if (own(item).some(id => state.mods.includes(id))) continue;
+        const id = soleId(item);
+        if (!id) {
+          if (own(item).length > 1) several.push(item);
           continue;
         }
-        enable(key);
-        enabledIds.add(instance(key).id);
+        enable(id);
         changed++;
       }
     } else {
-      const declared = new Set(itemIds.flatMap(id => model.items.get(id).declared));
-      state.order = state.order.filter(key => {
-        const inst = instance(key);
-        const off = items.has(inst.itemId) || (inst.unknown && declared.has(inst.id));
-        if (off) changed++;
-        return !off;
-      });
+      const off = new Set(itemIds.flatMap(id => own(model.items.get(id))));
+      state.mods = state.mods.filter(id => !off.has(id));
+      changed = before.length - state.mods.length;
     }
     commit();
-    const undo = h('button', { type: 'button', class: 'small', text: 'Undo', onclick: () => { state.order = before; commit(); status.replaceChildren(); } });
+    const undo = h('button', { type: 'button', class: 'small', text: 'Undo', onclick: () => { state.mods = before; commit(); status.replaceChildren(); } });
     status.replaceChildren(on
       ? `${plural(changed, 'mod')} on. ${several.length ? `${plural(several.length, 'item')} with several mods left to pick: ${several.map(itemTitle).join(', ')}. ` : ''}${changed ? 'Sort them in Load order. ' : ''}`
       : `${plural(changed, 'mod')} off. `, changed ? undo : '');
@@ -1158,10 +1260,11 @@
 
   function modNode(inst) {
     const { mod } = inst;
-    const box = h('input', { type: 'checkbox' });
+    // Enabling a mod ID with spaces around it would write an entry that names no mod.
+    const box = h('input', { type: 'checkbox', disabled: inst.id !== inst.id.trim() });
     box.addEventListener('change', () => {
-      if (box.checked) enable(inst.key);
-      else disable(inst.key);
+      if (box.checked) enable(inst.id);
+      else disable(inst.id);
       commit();
     });
     const facts = [
@@ -1173,7 +1276,6 @@
     const lines = [];
     const chips = (label, ids) => (ids.length ? h('span', {}, `${label} `, ids.map(id => h('span', { class: 'chip', text: id }))) : null);
     lines.push(chips('Load after', mod.loadModAfter), chips('Load before', mod.loadModBefore), chips('Maps', mod.maps));
-    if (others.length) lines.push(h('span', {}, `Same mod ID in ${others.map(other => itemTitle(other.item)).join(', ')}`));
     const status = h('div', { class: 'mod-info' });
     const row = h('div', { class: 'mod' },
       h('label', { class: 'mod-head' }, box, h('code', { text: inst.id }), mod.name && mod.name !== inst.id ? [' ', h('span', { text: mod.name })] : null),
@@ -1182,14 +1284,19 @@
       lines.some(Boolean) ? h('div', { class: 'mod-info' }, lines) : null,
       status);
     const refresh = () => {
-      const on = derived.pos.has(inst.key);
+      const on = derived.enabled.has(inst.id);
       box.checked = on;
       row.classList.toggle('on', on);
       const parts = [];
-      if (mod.require.length) parts.push(h('div', {}, 'Requires ', mod.require.map(r => requirementChip(r, inst, () => (status.querySelector('button') || box).focus()))));
+      if (others.length) {
+        const used = resolve(inst.id);
+        const which = used.status !== 'found' ? '' : used.inst === inst ? '; the game uses this copy' : `; the game uses the copy in ${itemTitle(used.item)}`;
+        parts.push(h('div', { text: `Same mod ID in ${others.map(other => itemTitle(other.item)).join(', ')}${which}` }));
+      }
+      if (mod.require.length) parts.push(h('div', {}, 'Requires ', mod.require.map(r => requirementChip(r, () => (status.querySelector('button') || box).focus()))));
       if (mod.incompatible.length) {
-        parts.push(h('div', {}, 'Incompatible with ', mod.incompatible.map(other => (derived.enabledById.has(other)
-          ? h('span', { class: 'chip bad', text: `${other} · on` })
+        parts.push(h('div', {}, 'Incompatible with ', mod.incompatible.map(other => (derived.loaded.has(other)
+          ? h('span', { class: 'chip bad', text: `${other} · ${derived.enabled.has(other) ? 'on' : 'loads'}` })
           : h('span', { class: 'chip', text: other })))));
       }
       status.replaceChildren(...parts);
@@ -1199,15 +1306,15 @@
     return row;
   }
 
-  // A mod ID from the description of an item that is not downloaded; it is enabled as `\ModId`.
+  // A mod ID from the description of an item that is not downloaded.
   function declaredModNode(id) {
     const box = h('input', { type: 'checkbox' });
     box.addEventListener('change', () => {
-      if (box.checked) enable(candidateFor(id, null)?.key ?? `\\${id}`);
-      else state.order = state.order.filter(key => instance(key).id !== id);
+      if (box.checked) enable(id);
+      else disable(id);
       commit();
     });
-    const refresh = () => { box.checked = derived.enabledById.has(id); };
+    const refresh = () => { box.checked = derived.enabled.has(id); };
     refresh();
     pickRefreshers.push(refresh);
     return h('label', {}, box, h('code', { text: id }));
@@ -1221,16 +1328,22 @@
       badge(inPack ? '' : 'warn', inPack ? 'in the pack' : 'not in the pack'));
   }
 
-  function requirementChip(r, inst, refocus) {
-    if (derived.enabledById.has(r)) return h('span', { class: 'chip ok', text: `${r} · on` });
-    const { candidate, declared, key } = source(r, inst);
-    if (candidate) return h('span', { class: 'chip warn' }, `${r} · off`, enableButton(key, refocus));
-    if (declared) {
-      return h('span', { class: 'chip warn', title: `${itemTitle(declared)} is not downloaded yet; its description names this mod ID.` },
-        `${r} · in ${itemTitle(declared)}, not downloaded`, enableButton(key, refocus));
+  // A required mod that is off still loads with the mod, before it; Enable only pins its place.
+  function requirementChip(raw, refocus) {
+    const r = raw.trim();
+    const entry = resolve(r);
+    if (entry.status === 'unknown') {
+      return h('span', { class: 'chip bad', title: 'No downloaded mod has this ID and no description in the pack names it.' }, `${r} · not found in the pack`,
+        h('a', { class: 'chip-link', href: `https://steamcommunity.com/workshop/browse/?appid=108600&searchtext=${encodeURIComponent(r)}`, target: '_blank', rel: 'noopener noreferrer', text: 'search the workshop' }));
     }
-    return h('span', { class: 'chip bad', title: 'No downloaded mod has this ID and no description in the pack names it.' }, `${r} · not found in the pack`,
-      h('a', { class: 'chip-link', href: `https://steamcommunity.com/workshop/browse/?appid=108600&searchtext=${encodeURIComponent(r)}`, target: '_blank', rel: 'noopener noreferrer', text: 'search the workshop' }));
+    const failure = failureAlone(r);
+    if (failure) return h('span', { class: 'chip bad', text: `${r} · ${failure}` });
+    if (derived.enabled.has(r)) return h('span', { class: 'chip ok', text: `${r} · on` });
+    if (entry.status === 'pending') {
+      return h('span', { class: 'chip', title: `${itemTitle(entry.item)} is not downloaded yet; its description names this mod ID.` },
+        `${r} · in ${itemTitle(entry.item)}, not downloaded`, enableButton(r, refocus));
+    }
+    return h('span', { class: 'chip' }, `${r} · loads with it`, enableButton(r, refocus));
   }
 
   function itemHints(item) {
@@ -1304,37 +1417,37 @@
     return h('button', { type: 'button', 'data-action': action, title: label, 'aria-label': label, disabled, onclick: run }, glyph);
   }
 
-  function moveMod(from, insertAt, key, action) {
-    moveItem(state.order, from, insertAt);
-    commit(key && (() => focusRow(orderRows.get(key), action)));
+  function moveMod(from, insertAt, id, action) {
+    moveItem(state.mods, from, insertAt);
+    commit(id && (() => focusRow(orderRows.get(id), action)));
   }
 
   function renderOrder() {
     orderRows = new Map();
-    const n = derived.order.length;
-    const oneBand = new Set(derived.bandOfKey.values()).size < 2;
-    const rows = derived.order.map((inst, i) => {
+    const n = derived.rows.length;
+    const oneBand = new Set(derived.bandOfId.values()).size < 2;
+    const rows = derived.rows.map(({ id, item }, i) => {
       const notes = derived.notes[i];
-      const band = derived.bandOfKey.get(inst.key);
+      const band = derived.bandOfId.get(id);
       const first = derived.firstOfBand.get(band);
-      const level = notes.some(note => note.level === 'bad') ? 'bad' : notes.length ? 'warn' : null;
+      const level = notes.some(note => note.level === 'bad') ? 'bad' : notes.some(note => note.level === 'warn') ? 'warn' : null;
       const row = h('li', { class: level, draggable: 'true', 'data-index': i, tabindex: '-1' },
         h('span', { class: 'handle', 'aria-hidden': 'true', text: '⠿' }),
         h('span', { class: 'pos', text: i + 1 }),
         h('div', { class: 'grow' },
-          h('div', {}, h('code', { text: inst.id }), inst.item ? [' ', h('span', { class: 'muted', text: itemTitle(inst.item) })] : null),
+          h('div', {}, h('code', { text: id }), item ? [' ', h('span', { class: 'muted', text: itemTitle(item) })] : null),
           notes.length ? h('ul', { class: 'notes' }, notes.map(note => h('li', { class: note.level }, note.text,
-            note.enable ? enableButton(note.enable, () => focusRow(orderRows.get(inst.key))) : null))) : null),
+            note.enable ? enableButton(note.enable, () => focusRow(orderRows.get(id))) : null))) : null),
         oneBand ? null : h('span', { class: 'band', text: bandLabel(band) }),
         h('span', { class: 'row-buttons' },
-          rowButton('up', `Move ${inst.id} up`, '↑', i === 0, () => moveMod(i, i - 1, inst.key, 'up')),
-          rowButton('down', `Move ${inst.id} down`, '↓', i === n - 1, () => moveMod(i, i + 2, inst.key, 'down')),
-          rowButton('top', `Move ${inst.id} to the top of its band`, '⤒', first >= i, () => moveMod(i, first, inst.key, 'top')),
-          rowButton('off', `Disable ${inst.id}`, '✕', false, () => {
-            disable(inst.key);
-            commit(() => focusRow($('order-list').children[Math.min(i, derived.order.length - 1)], 'off'));
+          rowButton('up', `Move ${id} up`, '↑', i === 0, () => moveMod(i, i - 1, id, 'up')),
+          rowButton('down', `Move ${id} down`, '↓', i === n - 1, () => moveMod(i, i + 2, id, 'down')),
+          rowButton('top', `Move ${id} to the top of its band`, '⤒', first >= i, () => moveMod(i, first, id, 'top')),
+          rowButton('off', `Disable ${id}`, '✕', false, () => {
+            disable(id);
+            commit(() => focusRow($('order-list').children[Math.min(i, derived.rows.length - 1)], 'off'));
           })));
-      orderRows.set(inst.key, row);
+      orderRows.set(id, row);
       return row;
     });
     $('order-list').replaceChildren(...rows);
@@ -1344,7 +1457,7 @@
 
   function renderBands() {
     const counts = new Map();
-    for (const band of derived.bandOfKey.values()) counts.set(band, (counts.get(band) || 0) + 1);
+    for (const band of derived.bandOfId.values()) counts.set(band, (counts.get(band) || 0) + 1);
     const visible = derived.bands.filter(band => counts.has(band));
     derived.visibleBands = visible;
     bandRows = new Map();
@@ -1397,7 +1510,7 @@
   }
 
   function renderSandbox() {
-    const nodes = derived.order.filter(inst => inst.mod?.sandbox.length).map(inst => sandboxSection(inst).details);
+    const nodes = derived.modsWithOptions.map(inst => sandboxSection(inst).details);
     const box = $('sandbox-list');
     if (nodes.length !== box.children.length || nodes.some((node, i) => box.children[i] !== node)) box.replaceChildren(...nodes);
     $('sandbox-empty').hidden = nodes.length > 0;
@@ -1507,7 +1620,7 @@
       const details = h('details', { class: info ? 'problem-kind info' : 'problem-kind', 'data-kind': kind, open: problemsOpen.has(kind) },
         h('summary', {}, `${typeof label === 'function' ? label() : label} `, h('span', { class: 'n', text: entries.length })),
         h('ul', {},
-          explanation ? h('li', { class: 'hint', text: explanation }) : null,
+          explanation ? h('li', { class: 'hint', text: typeof explanation === 'function' ? explanation() : explanation }) : null,
           entries.slice(0, limit).map((entry, i) => h('li', {}, h('button', { type: 'button', class: 'link', text: entry.text, onclick: entry.go }),
             entry.enable ? [' ', enableButton(entry.enable, () => focusProblem(kind, i))] : null)),
           entries.length > limit ? h('li', { class: 'muted', text: `and ${entries.length - limit} more` }) : null));
@@ -1636,7 +1749,7 @@
     store.remove(JSON_KEY);
     store.remove(STATE_KEY);
     store.remove(LOAD_KEY);
-    model = state = derived = null;
+    model = state = derived = view = null;
     remembering = false;
     pickRefreshers = [];
     itemNodes = new Map();
@@ -1675,8 +1788,8 @@
     const env = parseEnv($('env-text').value);
     const done = [];
     if (env.has('INI_mods')) {
-      state.order = [...new Set(splitList(env.get('INI_mods')).map(resolveEntry).filter(Boolean))];
-      done.push(plural(state.order.length, 'mod'));
+      state.mods = modIds(env.get('INI_mods'));
+      done.push(plural(state.mods.length, 'mod'));
     }
     if (env.has('WORKSHOP_IDS')) {
       state.workshopIds = splitList(env.get('WORKSHOP_IDS'));
@@ -1750,12 +1863,12 @@
     commit();
   });
   $('sort').addEventListener('click', () => {
-    const { keys, cycles } = sortedOrder();
+    const { ids, cycles } = sortedOrder();
     // The fewest mods that had to move: all but the longest run that kept its relative order.
-    const pos = new Map(state.order.map((key, i) => [key, i]));
+    const pos = new Map(state.mods.map((id, i) => [id, i]));
     const tails = [];
-    for (const key of keys) {
-      const p = pos.get(key);
+    for (const id of ids) {
+      const p = pos.get(id);
       let lo = 0;
       let hi = tails.length;
       while (lo < hi) {
@@ -1765,8 +1878,8 @@
       }
       tails[lo] = p;
     }
-    const moved = keys.length - tails.length;
-    state.order = keys;
+    const moved = ids.length - tails.length;
+    state.mods = ids;
     commit();
     $('sort-status').textContent = (moved ? `Sorted: moved ${plural(moved, 'mod')}.` : 'Already in order.')
       + cycles.map(ids => ` ${ids.join(', ')} require or load after each other in a cycle, so they keep their order.`).join('');

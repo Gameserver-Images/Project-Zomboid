@@ -73,11 +73,11 @@ Every restart brings the game up to date, which matters because updated clients 
 ## Mods and maps
 
 * `WORKSHOP_IDS`: workshop item and collection IDs separated by `;`. Collections are expanded into their items; private or unlisted ones need `STEAM_API_KEY`. The server downloads the items while it starts. Items that are removed, hidden or private on the workshop are left out with a warning, since the server can't download them and would stop with an error; one it already downloaded stays, without updates.
-* `INI_Mods`: the mod IDs to enable, separated by `;`. On Build 42 each one starts with a backslash (`INI_Mods=\ModOne;\ModTwo`); write a single backslash in the env file.
+* `INI_Mods`: the mod IDs to enable, separated by `;`. Build 42 writes them with a backslash in front (`INI_Mods=\ModOne;\ModTwo`; write a single backslash in the env file), but plain IDs work too, and Build 41 needs them plain. The server also loads the mods they require, before them, whether or not they are listed.
 
-Maps from enabled mods are added to the `Map=` line automatically, before the vanilla map, with their spawn points. Since downloads happen while the server starts, a new map is added on the start after the one that downloaded it. Taking a map mod out of `INI_Mods` removes its maps again.
+Maps of the mods the server loads are added to the `Map=` line automatically, before the vanilla map, with their spawn points. Since downloads happen while the server starts, a new map is added on the start after the one that downloaded it, and maps are only taken out once every item is downloaded. Taking a map mod out of `INI_Mods` removes its maps again, and so does a mod the server doesn't load.
 
-`docker exec <container> list-mods > mods.json` describes your workshop items and every mod in them: requirements, load order hints, maps and sandbox options. Load that file on the [mods page](https://gameserver-images.github.io/Project-Zomboid/mods.html) to pick and order mods and set their sandbox options, then copy the `.env` lines it writes. The log also warns at startup about enabled mods that are missing, lack a required mod, load in the wrong order or conflict.
+`docker exec <container> list-mods > mods.json` describes your workshop items and every mod in them: requirements, load order hints, maps and sandbox options. Load that file on the [mods page](https://gameserver-images.github.io/Project-Zomboid/mods.html) to pick and order mods and set their sandbox options, then copy the `.env` lines it writes. The log also warns at startup about enabled mods the server can't find or won't load, saying why, and about mods that load in the wrong order or conflict.
 
 ## Running the server
 
