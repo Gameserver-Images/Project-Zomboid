@@ -225,9 +225,28 @@ split_list() {
   tr ';' '\n' <<< "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
 }
 
+workshop_details() {
+  # stdin = workshop IDs, one per line. Prints Steam's details of each 100 of them as one JSON line;
+  # fails when Steam can't be reached or leaves an item out.
+  local i response
+  local -a batch=() ids=()
+  while mapfile -t -n 100 batch && [ "${#batch[@]}" -gt 0 ]; do
+    ids=()
+    for i in "${!batch[@]}"; do
+      ids+=(--data-urlencode "publishedfileids[$i]=${batch[$i]}")
+    done
+    response="$(curl -fsS --max-time 30 -X POST --data-urlencode "itemcount=${#batch[@]}" "${ids[@]}" \
+      'https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/')" || return 1
+    jq -ce --argjson count "${#batch[@]}" 'select((.response.publishedfiledetails | length) == $count)' \
+      <<< "${response}" 2>/dev/null || return 1
+  done
+}
+
 apply_workshop_ids() {
-  # $1 = INI file. Collections in WORKSHOP_IDS are expanded to the items they contain.
-  local ini_file="$1" ids resolved
+  # $1 = INI file, $2 = workshop content dir. Collections in WORKSHOP_IDS are expanded to the items
+  # they contain.
+  local ini_file="$1" content_dir="$2" ids resolved details id
+  local -a unavailable=() kept=() dropped=()
   [ -n "${WORKSHOP_IDS+x}" ] || return 0
   ids="$(split_list "${WORKSHOP_IDS}" | paste -sd ';')"
   if [ -z "${ids}" ]; then
@@ -237,6 +256,28 @@ apply_workshop_ids() {
   if ! resolved="$(bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" "${ids}")" || [ -z "${resolved}" ]; then
     echo "Warning: could not resolve WORKSHOP_IDS through the Steam API, leaving WorkshopItems unchanged." >&2
     return 0
+  fi
+  if ! details="$(workshop_details <<< "${resolved}")"; then
+    echo "Warning: could not check the workshop items through the Steam API, leaving WorkshopItems unchanged." >&2
+    return 0
+  fi
+  # Steam answers result 9 for items that are removed, hidden or private. The server stops with an
+  # error on one it can't download, but keeps using one it downloaded before.
+  mapfile -t unavailable < <(jq -r '.response.publishedfiledetails[] | select(.result == 9) | .publishedfileid' <<< "${details}")
+  for id in "${unavailable[@]}"; do
+    if [ -d "${content_dir}/${id}" ]; then
+      kept+=("${id}")
+    else
+      dropped+=("${id}")
+    fi
+  done
+  if [ "${#kept[@]}" -gt 0 ]; then
+    echo "Warning: these workshop items are removed, hidden or private; the server keeps the copy it downloaded, which gets no more updates: ${kept[*]}" >&2
+  fi
+  if [ "${#dropped[@]}" -gt 0 ]; then
+    echo "Warning: these workshop items are removed, hidden or private, so they were left out of WorkshopItems: ${dropped[*]}" >&2
+    echo "         Take them out of WORKSHOP_IDS or its collections." >&2
+    resolved="$(grep -vxF -f <(printf '%s\n' "${dropped[@]}") <<< "${resolved}")"
   fi
   resolved="$(paste -sd ';' <<< "${resolved}")"
   set_ini_value "${ini_file}" WorkshopItems "${resolved}"

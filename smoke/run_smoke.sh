@@ -188,31 +188,38 @@ test_maps() {
 test_workshop() {
   TEST=workshop
   new_env
-  # A fake Steam API: 111 is a collection holding item 333, collection 444 (item 555) and the empty
-  # collection 666; 222 is an item.
-  mkdir -p "${WORK}/bin"
-  cat > "${WORK}/bin/curl" <<'CURL'
-#!/bin/bash
-if [[ "$*" == *"=444"* ]]; then
-  echo '{"response":{"collectiondetails":[{"publishedfileid":"444","result":1,"children":[{"publishedfileid":"555","filetype":0}]},{"publishedfileid":"666","result":1,"children":[]}]}}'
-else
-  echo '{"response":{"collectiondetails":[{"publishedfileid":"111","result":1,"children":[{"publishedfileid":"333","filetype":0},{"publishedfileid":"444","filetype":2},{"publishedfileid":"666","filetype":2}]},{"publishedfileid":"222","result":9}]}}'
-fi
-CURL
-  chmod +x "${WORK}/bin/curl"
-  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 111;;222; ' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null
-  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=222;333;555'
-  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' ; ' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null
+  fake_steam
+  local content="${STEAMAPPDIR}/steamapps/workshop/content/108600"
+  apply() { PATH="${WORK}/bin:${PATH}" apply_workshop_ids "${SERVER}/pzserver.ini" "${content}" > /dev/null 2> "${WORK}/err"; }
+  # 900 holds items 101, 102 and 103 (in nested collections, one of them empty); 104 is hidden, and
+  # the server stops with an error on an item it can't download.
+  WORKSHOP_IDS=' 900;;104; ' apply
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=101;102;103'
+  grep -q "left out of WorkshopItems: 104$" "${WORK}/err" || fail "the hidden item was not reported"
+  WORKSHOP_IDS=' ; ' apply
   expect_line "${SERVER}/pzserver.ini" 'WorkshopItems='
-  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='111;222' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null
-  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=222;333;555'
-  PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" --tree '111;222' > "${WORK}/out"
+  WORKSHOP_IDS='104' apply
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems='
+  # Only result 9 means the item is gone; other failures can pass.
+  WORKSHOP_IDS='107' apply
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=107'
+  # A hidden item the server downloaded before still loads from that copy.
+  make_mod 104 Hidden HiddenMod 42
+  WORKSHOP_IDS='900;104' apply
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=101;102;103;104'
+  grep -q "keeps the copy it downloaded.*: 104$" "${WORK}/err" || fail "the kept hidden item was not reported"
+  rm -rf "${content}/104"
+  PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/resolve_workshop_collection.sh" --tree '900;104' > "${WORK}/out"
   expect_eq "$(jq -s -c 'map({id, children: (.children // [] | map(.id + (if .collection then "c" else "" end)))})' "${WORK}/out")" \
-    '[{"id":"111","children":["333","444c","666c"]},{"id":"222","children":[]},{"id":"444","children":["555"]},{"id":"666","children":[]}]'
+    '[{"id":"900","children":["101","910c","102"]},{"id":"104","children":[]},{"id":"910","children":["103","920c"]},{"id":"920","children":[]}]'
   jq -e -s '.[1].children == null and .[3].children == []' "${WORK}/out" > /dev/null || fail "--tree did not tell items from empty collections"
-  printf '#!/bin/bash\nexit 6\n' > "${WORK}/bin/curl"
-  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='111' apply_workshop_ids "${SERVER}/pzserver.ini" > /dev/null 2>&1
-  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=222;333;555'
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems 105
+  FAKE_STEAM_DOWN=1 WORKSHOP_IDS='900' apply
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=105'
+  # An answer that leaves an item out says nothing about it.
+  FAKE_STEAM_PARTIAL=104 WORKSHOP_IDS='900;104' apply
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=105'
+  grep -q "could not check the workshop items" "${WORK}/err" || fail "the incomplete answer was not reported"
 }
 
 mod_file() {
@@ -224,7 +231,8 @@ mod_file() {
 
 fake_steam() {
   # A fake Steam API on PATH that logs "<API> <ID count>" per call. 900 is a collection holding item
-  # 101, collection 910 (item 103 and the empty collection 920) and item 102. Item 104 is hidden.
+  # 101, collection 910 (item 103 and the empty collection 920) and item 102. Item 104 is hidden, and
+  # Steam fails to answer for item 107 (result 2).
   # With the key "secret", item 101 requires item 102.
   mkdir -p "${WORK}/bin"
   cat > "${WORK}/bin/curl" <<'CURL'
@@ -256,7 +264,9 @@ case "${url}" in
           {publishedfileid: ., result: 1, children: [$collections[.][] | {publishedfileid: .[0], filetype: .[1]}]}
         else {publishedfileid: ., result: 9} end]}}' ;;
   */GetPublishedFileDetails)
-    jq -n -c --argjson ids "${ids}" '{response: {publishedfiledetails: [$ids[] | if . == "104" then {publishedfileid: ., result: 9} else
+    [ -n "${FAKE_STEAM_PARTIAL:-}" ] && ids="$(jq -c --arg drop "${FAKE_STEAM_PARTIAL}" 'map(select(. != $drop))' <<< "${ids}")"
+    jq -n -c --argjson ids "${ids}" '{response: {publishedfiledetails: [$ids[] | if . == "104" then {publishedfileid: ., result: 9}
+      elif . == "107" then {publishedfileid: ., result: 2} else
       {publishedfileid: ., result: 1, title: "Item \(.)", description: "[b]About \(.)[/b]", tags: [{tag: "Build 42"}],
        time_updated: 1700000000, file_size: "4096"} end]}}' ;;
   */GetDetails)
@@ -388,10 +398,11 @@ EOF
   PATH="${WORK}/bin:${PATH}" STEAM_API_KEY=secret bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed with a key"
   expect_eq "$(jq -c '[.items[] | select(.id | length == 3) | .requiredItems]' "${out}")" '[["102"],[],[],[]]'
   expect_eq "$(jq -c '[.items[].id] | length' "${out}")" 155
-  expect_eq "$(paste -sd ' ' "${HOMEDIR}/steam-calls")" "GetPublishedFileDetails 100 GetDetails 100 GetPublishedFileDetails 55 GetDetails 55"
+  expect_eq "$(paste -sd ' ' "${HOMEDIR}/steam-calls")" "GetPublishedFileDetails 100 GetPublishedFileDetails 55 GetDetails 100 GetDetails 55"
   (PATH="${WORK}/bin:${PATH}" STEAM_API_KEY=wrong bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded with a wrong key"
   [ -s "${out}" ] && fail "list-mods printed output with a wrong key"
   grep -q '^Error: .*STEAM_API_KEY' "${WORK}/err" || fail "the wrong key was not explained"
+  (PATH="${WORK}/bin:${PATH}" FAKE_STEAM_PARTIAL=1000 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> /dev/null) && fail "list-mods succeeded with an incomplete first batch"
 
   # Build 41 loads the mod.info in the mod folder itself.
   echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"

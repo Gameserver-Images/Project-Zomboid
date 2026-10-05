@@ -55,7 +55,7 @@ configure_server() {
   apply_preset "${lua_file}"
   apply_ini_env "${ini_file}"
 
-  apply_workshop_ids "${ini_file}"
+  apply_workshop_ids "${ini_file}" "${content_dir}"
   apply_mod_maps "${ini_file}" "${spawn_file}" "${content_dir}"
   report_mod_problems "${ini_file}" "${content_dir}"
   apply_sandbox_env "${lua_file}"

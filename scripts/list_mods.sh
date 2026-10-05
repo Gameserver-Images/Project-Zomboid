@@ -30,17 +30,6 @@ ini_list() {
   split_list "$(ini_value "${ini_file}" "$1")"
 }
 
-steam_api() {
-  # $1 = file to append the response to, $2 = what failed, then the curl arguments
-  local out="$1" error="$2"
-  shift 2
-  if ! curl -fsS --max-time 30 "$@" > "${tmp}/response" || ! jq -e '.response' "${tmp}/response" > /dev/null 2>&1; then
-    echo "Error: ${error}" >&2
-    exit 1
-  fi
-  cat "${tmp}/response" >> "${out}"
-}
-
 workshop_ids="$(split_list "${WORKSHOP_IDS:-}")"
 server_mods="$(ini_list Mods)"
 server_map="$(ini_list Map)"
@@ -65,24 +54,28 @@ mapfile -t lookup < <({
   printf '%s\n' "${server_items}"
   cat "${tmp}/downloaded"
 } | sed '/^$/d' | sort -u)
-: > "${tmp}/details"
+if ! printf '%s\n' "${lookup[@]}" | sed '/^$/d' | workshop_details > "${tmp}/details"; then
+  echo "Error: could not get the workshop item details from the Steam API." >&2
+  exit 1
+fi
+# Required items ("Required items" on the workshop page) are only in this API, which needs a key.
 : > "${tmp}/required"
-for ((start = 0; start < ${#lookup[@]}; start += 100)); do
-  batch=("${lookup[@]:start:100}")
-  ids=()
-  for i in "${!batch[@]}"; do
-    ids+=(--data-urlencode "publishedfileids[$i]=${batch[$i]}")
+if [ -n "${STEAM_API_KEY:-}" ]; then
+  for ((start = 0; start < ${#lookup[@]}; start += 100)); do
+    batch=("${lookup[@]:start:100}")
+    ids=()
+    for i in "${!batch[@]}"; do
+      ids+=(--data-urlencode "publishedfileids[$i]=${batch[$i]}")
+    done
+    if ! curl -fsS --max-time 30 -G --data-urlencode "key=${STEAM_API_KEY}" --data-urlencode includechildren=true "${ids[@]}" \
+      'https://api.steampowered.com/IPublishedFileService/GetDetails/v1/' > "${tmp}/response" \
+      || ! jq -e '.response' "${tmp}/response" > /dev/null 2>&1; then
+      echo "Error: could not get the required items from the Steam API; check that STEAM_API_KEY is a valid key." >&2
+      exit 1
+    fi
+    cat "${tmp}/response" >> "${tmp}/required"
   done
-  steam_api "${tmp}/details" "could not get the workshop item details from the Steam API." \
-    -X POST --data-urlencode "itemcount=${#batch[@]}" "${ids[@]}" \
-    'https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/'
-  # Required items ("Required items" on the workshop page) are only in this API, which needs a key.
-  if [ -n "${STEAM_API_KEY:-}" ]; then
-    steam_api "${tmp}/required" "could not get the required items from the Steam API; check that STEAM_API_KEY is a valid key." \
-      -G --data-urlencode "key=${STEAM_API_KEY}" --data-urlencode includechildren=true "${ids[@]}" \
-      'https://api.steampowered.com/IPublishedFileService/GetDetails/v1/'
-  fi
-done
+fi
 
 mod_info_rows "${version}" "${content_dir}"/*/mods > "${tmp}/mods"
 
