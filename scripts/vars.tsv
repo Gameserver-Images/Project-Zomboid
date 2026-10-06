@@ -1,5 +1,6 @@
 GAME_BRANCH	Steam branch of the game, installed or updated on every start: public (the stable game, default), unstable (the beta), an older version such as 42.19, or legacy41 (Build 41), as listed under "Betas" in Steam.
 GAME_UPDATE	Check Steam for a game update on every start (true/false, default true). With false an installed game starts as it is.
+GAME_FILE_WATCHER	The game's file watcher, which reloads game and mod files that change while the server runs: auto (default) turns it off for a start when the game would need more than half of the host's inotify watches (fs.inotify.max_user_watches) or its mod folders can't be counted yet, since running out stops the server; true keeps it on, false keeps it off.
 ADMINUSERNAME	Admin account name created on the first start (default: admin).
 ADMINPASSWORD	Admin account password. Required on the first start, when the server creates its database; ignored afterwards.
 ADMINPASSWORD_FILE	File holding the admin password; takes precedence over ADMINPASSWORD.

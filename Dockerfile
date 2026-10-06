@@ -1,6 +1,13 @@
 ###########################################################
 # Dockerfile that builds a Project Zomboid Gameserver
 ###########################################################
+# Built on the image's own base for its C library; the compiler stays in this stage.
+FROM cm2network/steamcmd:root AS shim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends --no-install-suggests gcc libc6-dev
+COPY shim/no_file_watcher.c /src/
+RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC -o /src/no_file_watcher.so /src/no_file_watcher.c
+
 FROM cm2network/steamcmd:root
 
 ENV STEAMAPPID=380870
@@ -28,6 +35,7 @@ RUN mkdir -p "${STEAMAPPDIR}" "${HOMEDIR}/Zomboid" \
   && chown -R "${USER}:${USER}" "${HOMEDIR}"
 
 COPY --chmod=755 scripts /server/scripts
+COPY --from=shim /src/no_file_watcher.so /usr/local/lib/no_file_watcher.so
 # image-env lists the variables the image sets itself, so startup can warn about unknown ones.
 RUN ln -s /server/scripts/list_env.sh /usr/local/bin/list-env \
   && ln -s /server/scripts/list_mods.sh /usr/local/bin/list-mods \

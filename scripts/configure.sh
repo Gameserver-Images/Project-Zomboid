@@ -1,5 +1,6 @@
 #!/bin/bash
-# Applies the environment to the server's config files and builds ARGS. Sourced by entry.sh.
+# Applies the environment to the server's config files and builds ARGS and the game's LD_PRELOAD.
+# Sourced by entry.sh.
 
 # shellcheck source=scripts/lib/config.sh
 . "${SCRIPT_DIR}/lib/config.sh"
@@ -7,6 +8,8 @@
 . "${SCRIPT_DIR}/lib/mods.sh"
 # shellcheck source=scripts/lib/args.sh
 . "${SCRIPT_DIR}/lib/args.sh"
+# shellcheck source=scripts/lib/watcher.sh
+. "${SCRIPT_DIR}/lib/watcher.sh"
 
 apply_preset() {
   # $1 = SandboxVars file
@@ -68,5 +71,6 @@ configure_server() {
       exit 1
     fi
   fi
+  configure_file_watcher /proc/sys/fs/inotify/max_user_watches "${ini_file}" "${content_dir}" "${mods}"
   build_server_args "${admin_password}"
 }

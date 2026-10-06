@@ -10,5 +10,6 @@
 /game/*
 !/game/.gitkeep
 !/scripts/
+!/shim/
 !/site/
 !/smoke/

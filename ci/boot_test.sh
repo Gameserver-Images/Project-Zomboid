@@ -2,8 +2,11 @@
 # Boots an image on a game branch and checks that it installs the game, starts the
 # server, keeps settings written before its first start, creates its database and saves on
 # `docker stop`, then starts it again to check the update and the settings against the files the
-# server wrote. Writes the env reference for the docs site to <out dir>/<branch>-<build id>.json,
-# with the image version from its org.opencontainers.image.version label.
+# server wrote. Then, with the host's inotify watch limit below what the game watches with a mod, it
+# checks that the image turns the game's file watcher off, and whether the game still needs that. That
+# limit holds for every user of the host for a few minutes, a desktop's programs included. Writes the
+# env reference for the docs site to <out dir>/<branch>-<build id>.json, with the image version from
+# its org.opencontainers.image.version label.
 # Usage: boot_test.sh <image> <game branch> <out dir>
 
 set -euo pipefail
@@ -14,6 +17,7 @@ out_dir="$3"
 name="pz-boot-test"
 # Kept after the test, so a failed run can be inspected.
 game_volume="pz-boot-game"
+home_volume="pz-boot-home"
 home="/home/steam/Zomboid"
 release="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "${image}")"
 if [ -z "${release}" ] || [ "${release}" = "<no value>" ]; then
@@ -29,15 +33,22 @@ fail() {
   docker logs --tail 150 "${name}" >&2 || true
   exit 1
 }
-trap 'docker rm -f "${name}" >/dev/null 2>&1 || true' EXIT
+# The inotify watch limit to restore, while it is lowered
+watch_limit=""
+cleanup() {
+  docker rm -f "${name}" >/dev/null 2>&1 || true
+  [ -z "${watch_limit}" ] || sudo sysctl -q -w "fs.inotify.max_user_watches=${watch_limit}" || true
+}
+trap cleanup EXIT
 
 wait_healthy() {
+  # Returns 1 when the server exits before it starts.
   local status=""
   echo "Waiting for the server to start"
   for _ in $(seq 1 240); do
     status="$(docker inspect -f '{{.State.Health.Status}}' "${name}")"
     [ "${status}" = healthy ] && return 0
-    [ "$(docker inspect -f '{{.State.Running}}' "${name}")" = true ] || fail "the server exited before it started"
+    [ "$(docker inspect -f '{{.State.Running}}' "${name}")" = true ] || return 1
     sleep 5
   done
   fail "the server did not start within 20 minutes"
@@ -58,7 +69,7 @@ docker run -d --name "${name}" --health-interval=5s \
   -e ADMINPASSWORD=boot-test -e INI_PublicName="Boot test" -e INI_Public=false \
   -e SANDBOX_ZombieLore__Transmission=4 -e CONFIG_STRICT=true \
   "${image}" >/dev/null
-wait_healthy
+wait_healthy || fail "the server exited before it started"
 
 game_lines="$(docker logs "${name}" 2>&1 | grep 'Game: ' || true)"
 build="$(sed -n "s/^Game: ${branch} branch, build \([0-9][0-9]*\)$/\1/p" <<< "${game_lines}" | tail -n 1)"
@@ -109,7 +120,7 @@ stop_server 1
 
 # CONFIG_STRICT now checks every variable against the server's own files.
 docker start "${name}" >/dev/null
-wait_healthy
+wait_healthy || fail "the server exited before it started"
 [ "$(docker logs "${name}" 2>&1 | grep -c "^Game: ${branch} branch, build ")" = 2 ] \
   || fail "the second start did not check the game for updates"
 docker exec "${name}" grep -qx 'PublicName=Boot test' "${home}/Server/pzserver.ini" \
@@ -120,4 +131,50 @@ docker exec "${name}" grep -qE '^[[:space:]]*Transmission = 4,' "${home}/Server/
 docker exec "${name}" sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " "' | grep -q -- '-adminpassword' \
   && fail "-adminpassword was passed although the database exists"
 stop_server 2
+
+# The game stops when it runs out of inotify watches in its media folder or in a mod folder. With a
+# limit of one and a half times the folders of its media folder and a mod with twice as many, the
+# media folder fits and the mod alone doesn't, so these starts run out where a real server's mods make
+# the game run out. It only stops when that happens before the last mods folder it lists, Zomboid/mods,
+# so the mod is a local workshop item in Zomboid/Workshop, which it lists first; the image doesn't read
+# those and warns that it can't find the mod. Without update checks these starts are quick.
+start_low_limit() {
+  # $@ = more docker run options
+  docker rm -f "${name}" >/dev/null
+  docker run -d --name "${name}" --health-interval=5s \
+    -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
+    -e GAME_UPDATE=false -e ADMINPASSWORD=boot-test -e INI_Mods=BootWatch "$@" "${image}" >/dev/null
+}
+media_dirs="$(docker run --rm -v "${game_volume}:/home/steam/pz-dedicated" --entrypoint find "${image}" \
+  /home/steam/pz-dedicated/media -type d | wc -l)"
+mod="${home}/Workshop/BootWatch/Contents/mods/BootWatch"
+# Build 41 reads mod.info and media/ in the mod folder, Build 42 those in common/.
+[[ "${version}" == 41.* ]] || mod="${mod}/common"
+docker volume rm -f "${home_volume}" >/dev/null
+docker run --rm -v "${home_volume}:${home}" --entrypoint bash "${image}" -c \
+  'mkdir -p "$1/media" && printf "name=BootWatch\nid=BootWatch\n" > "$1/mod.info" && cd "$1/media" && seq "$2" | xargs mkdir' \
+  _ "${mod}" "$((media_dirs * 2))"
+low_limit=$((media_dirs * 3 / 2))
+watch_limit="$(< /proc/sys/fs/inotify/max_user_watches)"
+echo "Lowering the inotify watch limit from ${watch_limit} to ${low_limit}; the game's media folder has ${media_dirs} folders"
+sudo sysctl -q -w "fs.inotify.max_user_watches=${low_limit}"
+
+start_low_limit
+wait_healthy || fail "the server stopped with ${low_limit} inotify watches, although the image should turn the game's file watcher off"
+grep -q "file watcher is off for this start" <<< "$(docker logs "${name}" 2>&1)" \
+  || fail "the image did not say that it turned the game's file watcher off with ${low_limit} inotify watches"
+stop_server 1
+
+start_low_limit -e GAME_FILE_WATCHER=true
+if wait_healthy; then
+  echo "::warning title=File watcher workaround::On ${label} the game no longer stops when it runs out of inotify watches, so once every game version the image supports does the same, GAME_FILE_WATCHER and shim/ can be removed."
+  stop_server 1
+else
+  logs="$(docker logs "${name}" 2>&1)"
+  grep -q "User limit of inotify watches reached" <<< "${logs}" && grep -q "Server Terminated" <<< "${logs}" \
+    || fail "with the file watcher on, the server exited before it started, but not because it ran out of inotify watches"
+  echo "With the file watcher on, the game still stops when it runs out of inotify watches"
+fi
+sudo sysctl -q -w "fs.inotify.max_user_watches=${watch_limit}"
+watch_limit=""
 echo "Boot test passed"

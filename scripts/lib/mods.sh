@@ -297,7 +297,7 @@ load_mods() {
   while IFS= read -r item; do
     [ -d "${content_dir}/${item}" ] || check_missing=0
     dirs+=("${content_dir}/${item}/mods")
-  done < <(split_list "$(ini_value "${ini_file}" WorkshopItems)")
+  done < <(split_list "$(ini_value "${ini_file}" WorkshopItems)" | awk '!seen[$0]++')
   dirs+=("${HOMEDIR}/Zomboid/mods")
   mod_info_rows "${version}" "${dirs[@]}" \
     | MODS="$(ini_value "${ini_file}" Mods)" LC_ALL=C awk -F '\t' -v version="${version}" -v check_missing="${check_missing}" '

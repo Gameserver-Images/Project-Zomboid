@@ -22,6 +22,8 @@ expect_eq() {
 new_env() {
   rm -rf "${WORK:?}/home"
   export HOMEDIR="${WORK}/home" STEAMAPPDIR="${WORK}/home/pz-dedicated" SERVERNAME=pzserver
+  # The tests check the LD_PRELOAD the scripts set.
+  unset LD_PRELOAD
   SERVER="${HOMEDIR}/Zomboid/Server"
   mkdir -p "${SERVER}" "${STEAMAPPDIR}/media/lua/shared/Sandbox" "${HOMEDIR}/Zomboid/db"
   cp "${REPO}/smoke/fixtures/pzserver.ini" "${SERVER}/pzserver.ini"
@@ -766,6 +768,99 @@ Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid
   [ -s "${WORK}/err" ] && fail "warned before every item was downloaded: $(cat "${WORK}/err")"
 }
 
+test_file_watcher() {
+  TEST=watcher
+  new_env
+  local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600" limit="${WORK}/limit"
+  local shim=/usr/local/lib/no_file_watcher.so
+  watcher() {
+    # $1 = inotify watch limit; prints the LD_PRELOAD the game gets
+    printf '%s\n' "$1" > "${limit}"
+    (configure_file_watcher "${limit}" "${ini}" "${content}" "$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> /dev/null)" \
+      > "${WORK}/out" 2> "${WORK}/err"; printf '%s' "${LD_PRELOAD:-}")
+  }
+  quiet() {
+    # $1 = why the last watcher should have printed nothing
+    [ ! -s "${WORK}/out" ] && [ ! -s "${WORK}/err" ] || fail "$1: $(cat "${WORK}/out" "${WORK}/err")"
+  }
+  # Here the game's media folder holds media, lua, shared and Sandbox, and a link the game doesn't follow.
+  mkdir -p "${HOMEDIR}/Zomboid/messaging"
+  ln -s "${STEAMAPPDIR}/media/lua" "${STEAMAPPDIR}/media/linked"
+  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  make_mod 100 RavenCreek RavenCreekMod 42 "Raven Creek"
+  mkdir -p "${content}/100/mods/RavenCreek/common/media/lua/client"
+  mkdir -p "${HOMEDIR}/Zomboid/mods/Local/42/media/lua"
+  printf 'id=LocalMod\n' > "${HOMEDIR}/Zomboid/mods/Local/42/mod.info"
+  # A version folder newer than the game, a mod without a mod.info for it, an item outside
+  # WorkshopItems and one without a mods folder don't count.
+  mkdir -p "${content}/100/mods/RavenCreek/42.22/media/scripts" "${content}/300"
+  make_mod 100 Old41 Old41Mod "" "B41 Map"
+  make_mod 200 Unseen UnseenMod 42 "Unseen Map"
+  set_ini_value "${ini}" WorkshopItems '100;300;100'
+  rows() { load_mods "${ini}" "${content}" "$1" 2> /dev/null; }
+
+  # Mod folders are only read once Mods= names a mod, whether or not it loads: then Zomboid/mods, the
+  # mods folder of item 100, two mod folders, 42/media and common/media of RavenCreek (3 each) and
+  # 42/media of Local (2) come on top, once however often WorkshopItems lists the item.
+  set_ini_value "${ini}" Mods ''
+  expect_eq "$(watched_dirs "${ini}" "${content}" "$(rows 42.21.0)")" 5
+  set_ini_value "${ini}" Mods '\Ghost'
+  expect_eq "$(watched_dirs "${ini}" "${content}" "$(rows 42.21.0)")" 17
+
+  # The game gets at most half of the limit.
+  expect_eq "$(watcher 34)" ''
+  quiet "said something although the game fits"
+  expect_eq "$(GAME_FILE_WATCHER='' watcher 34)" ''
+  expect_eq "$(GAME_FILE_WATCHER=AUTO watcher 34)" ''
+  expect_eq "$(watcher 33)" "${shim}"
+  [ -s "${WORK}/out" ] && fail "printed more than the warning: $(cat "${WORK}/out")"
+  expect_eq "$(cat "${WORK}/err")" "Warning: the game would watch 17 folders for file changes, more than half of the 33 inotify watches per user that the host allows (fs.inotify.max_user_watches).
+         Every program of the container's user on the host shares that limit, and running out stops the server while it starts.
+         So the game's file watcher is off for this start; it only reloads game and mod files that change while the server runs.
+         To keep it on, raise the limit on the Docker host, not in the container:
+           sudo sysctl -w fs.inotify.max_user_watches=524288
+           echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/90-inotify.conf
+         GAME_FILE_WATCHER=false turns it off without this warning."
+  expect_eq "$(LD_PRELOAD=/other.so; watcher 33)" "${shim}:/other.so"
+  # The suggested limit leaves the game half of it.
+  (watched_dirs() { echo 300000; }; watcher 100 > /dev/null)
+  expect_eq "$(grep -o 'max_user_watches=[0-9]*' "${WORK}/err" | sort -u)" 'max_user_watches=1048576'
+
+  # Mods of workshop items still to download, and all mods while the game version is unknown, can't
+  # be counted, so the watcher is off for that start unless the rest is too much already.
+  set_ini_value "${ini}" WorkshopItems '100;300;400'
+  expect_eq "$(watcher 34)" "${shim}"
+  expect_eq "$(cat "${WORK}/out")" "Config: the game's file watcher is off for this start, as its mod folders can't be counted before every workshop item is downloaded and the game version is known"
+  [ -s "${WORK}/err" ] && fail "warned about mods it can't count: $(cat "${WORK}/err")"
+  expect_eq "$(watcher 33)" "${shim}"
+  grep -q '^Warning: the game would watch 17 folders' "${WORK}/err" || fail "the folders it could count did not get the warning"
+  [ -s "${WORK}/out" ] && fail "printed more than the warning: $(cat "${WORK}/out")"
+  set_ini_value "${ini}" WorkshopItems '100;300'
+  rm "${HOMEDIR}/Zomboid/server-console.txt"
+  expect_eq "$(watcher 1000)" "${shim}"
+  grep -q "^Config: the game's file watcher is off" "${WORK}/out" || fail "the unknown game version did not turn the watcher off"
+  set_ini_value "${ini}" Mods ''
+  expect_eq "$(watcher 1000)" ''
+  set_ini_value "${ini}" Mods '\Ghost'
+
+  expect_eq "$(GAME_FILE_WATCHER=true watcher 1)" ''
+  quiet "said something although GAME_FILE_WATCHER is true"
+  expect_eq "$(GAME_FILE_WATCHER=on watcher 1)" ''
+  expect_eq "$(GAME_FILE_WATCHER=false watcher 1000000)" "${shim}"
+  expect_eq "$(GAME_FILE_WATCHER=off watcher 1000000)" "${shim}"
+  quiet "said something although GAME_FILE_WATCHER is off"
+  # Without the file there is no limit to check against.
+  rm "${limit}"
+  expect_eq "$(configure_file_watcher "${limit}" "${ini}" "${content}" "$(rows 42.21.0)" > "${WORK}/out" 2> "${WORK}/err"; printf '%s' "${LD_PRELOAD:-}")" ''
+  quiet "said something without a limit"
+
+  # Build 41 reads mod.info and media/ in the mod folder itself, whatever else is in it: that adds
+  # Old41 and its media folder (3).
+  mkdir -p "${content}/100/mods/Old41/42/media/lua" "${content}/100/mods/Old41/common/media/lua"
+  printf 'id=Old41Mod\n' > "${content}/100/mods/Old41/42/mod.info"
+  expect_eq "$(watched_dirs "${ini}" "${content}" "$(rows 41.78.16)")" 11
+}
+
 test_overlaps() {
   TEST=overlaps
   new_env
@@ -802,9 +897,12 @@ test_configure() {
   mkdir -p "${HOMEDIR}/Zomboid/mods/Local/42/media/maps/Local Map"
   printf 'id=LocalMap\n' > "${HOMEDIR}/Zomboid/mods/Local/42/mod.info"
   echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  configure_file_watcher() { printf '%s\n' "$@" > "${WORK}/watcher"; }
   configure_server > /dev/null 2> "${WORK}/err"
-  # The startup warnings and the maps follow the Mods= of this start.
+  # The startup warnings, the maps and the file watcher follow the Mods= of this start.
   expect_line "${WORK}/err" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
+  expect_line "${WORK}/watcher" /proc/sys/fs/inotify/max_user_watches
+  grep -q "^load	Zomboid	Local	42	1	LocalMap	" "${WORK}/watcher" || fail "the file watcher did not get the mods that load"
   expect_eq "$(grep -c 'Mods=' "${WORK}/err")" 1
   expect_line "${SERVER}/pzserver.ini" 'Map=Local Map;Muldraugh, KY'
   expect_line "${SERVER}/pzserver.ini" 'Password=p&ss|word'
@@ -850,7 +948,7 @@ test_vars_documented() {
   done < "${SCRIPT_DIR}/vars.tsv"
   for name in $(grep -rhoE '\$\{[A-Z][A-Z0-9_]+(:-|\+x|\})' "${SCRIPT_DIR}" | grep -oE '[A-Z][A-Z0-9_]+' | sort -u); do
     case "${name}" in
-      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|VANILLA_MAP|KEY|VALUE|NAME|LOG_*) continue ;;
+      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|VANILLA_MAP|KEY|VALUE|NAME|LOG_*) continue ;;
     esac
     grep -q "^${name}	" "${SCRIPT_DIR}/vars.tsv" || fail "${name} is read but not in vars.tsv"
   done
@@ -902,6 +1000,7 @@ test_entry() {
   cat > "${STEAMAPPDIR}/start-server.sh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$@" > "${HOMEDIR}/args"
+printf '%s\n' "${LD_PRELOAD:-}" > "${HOMEDIR}/preload"
 echo "LOG  : Network      f:0> *** SERVER STARTED ****"
 while IFS= read -r line; do
   [ "${line}" = quit ] && { echo "saving"; sleep 0.2; echo "saved"; exit 0; }
@@ -909,7 +1008,7 @@ while IFS= read -r line; do
 done
 EOF
   chmod +x "${STEAMAPPDIR}/start-server.sh"
-  (cd "${WORK}" && exec bash "${SCRIPT_DIR}/entry.sh") > "${WORK}/entry.log" 2>&1 &
+  (cd "${WORK}" && GAME_FILE_WATCHER=false exec bash "${SCRIPT_DIR}/entry.sh") > "${WORK}/entry.log" 2>&1 &
   local pid=$! healthy=false
   for _ in $(seq 1 50); do
     bash "${SCRIPT_DIR}/healthcheck.sh" && { healthy=true; break; }
@@ -926,9 +1025,10 @@ EOF
   grep -q saved "${WORK}/entry.log" || fail "the last server output was lost"
   bash "${SCRIPT_DIR}/healthcheck.sh" && fail "the health check passed after the server stopped"
   expect_line "${HOMEDIR}/args" "-servername"
+  expect_line "${HOMEDIR}/preload" /usr/local/lib/no_file_watcher.so
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_mod_folders test_workshop test_list_mods test_mod_warnings test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

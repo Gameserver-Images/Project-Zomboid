@@ -11,6 +11,7 @@ on:
       - main
     paths:
       - 'scripts/**'
+      - 'shim/**'
       - 'smoke/**'
       - 'ci/**'
       - 'site/**'
@@ -19,6 +20,7 @@ on:
   pull_request:
     paths:
       - 'scripts/**'
+      - 'shim/**'
       - 'smoke/**'
       - 'ci/**'
       - 'site/**'

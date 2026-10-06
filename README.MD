@@ -79,6 +79,15 @@ Maps of the mods the server loads are added to the `Map=` line automatically, be
 
 `docker exec <container> list-mods > mods.json` describes your workshop items and every mod in them: requirements, load order hints, maps and sandbox options. Load that file on the [mods page](https://gameserver-images.github.io/Project-Zomboid/mods.html) to pick and order mods and set their sandbox options, then copy the `.env` lines it writes. The log also warns at startup about enabled mods the server can't find or won't load, saying why, and about mods that load in the wrong order or conflict.
 
+With many mods the game can need more inotify watches than the host allows (`fs.inotify.max_user_watches`, a limit shared by every program of the same user on the host), and the server then stops while it starts. Every start checks this. When the game would need more than half of the limit, the log says so and the game's file watcher is off for that start; it only reloads game and mod files that change while the server runs. It is also off for a start that can't count the mod folders yet, because workshop items are still to download or the server hasn't logged its game version. To keep it on, raise the limit on the Docker host (not in the container):
+
+```bash
+sudo sysctl -w fs.inotify.max_user_watches=524288
+echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/90-inotify.conf
+```
+
+On a NAS that resets `/etc` on a reboot or update (Synology, Unraid), run the first command from a task that runs at boot instead. `GAME_FILE_WATCHER=true` keeps the watcher on and `false` keeps it off.
+
 ## Running the server
 
 * `docker stop` (or stopping it in Portainer) makes the server save the world and quit. `stop_grace_period: 120s` gives it time for that.
