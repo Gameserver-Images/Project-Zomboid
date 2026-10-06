@@ -396,7 +396,7 @@ option Multi.Old
 	type = boolean,
 	default = true,
 }
-*/ option Multi.Shared { type = double, /* was 2 */ default = 1.5, }
+*/ option Multi.Shared { type = double, /* was 2 */ min = 0, max = 5, default = 1.5, }
 option Multi.Separator
 {
 	translation = Multi_Separator,
@@ -414,19 +414,43 @@ EOF
   mkdir -p "${STEAMAPPDIR}/steamapps/workshop/content/108600/${multi}/"{42.21/media/maps/Variant\ Map,common/media/maps/Common\ Map,common/media/maps/Muldraugh\,\ KY,42/media/maps/Old\ Map}
   # A byte order mark hides the id= line from the game.
   printf '\357\273\277id=MultiAddon\r\nname=Addon\r\n' | mod_file 101/mods/Addon/42/mod.info
-  printf '%s\n' 'option Addon.Flag' '{' 'type = boolean,' 'default = false,' 'translation = Addon_Flag,' '}' \
+  printf '%s\r\n' 'VERSION = 1,' 'option Addon.Flag' '{' 'type = boolean,' 'default = false,' 'translation = Addon_Flag,' '}' \
     'option Addon.Mode' '{' 'type = enum, numValues = 2,' 'default = 1,' 'valueTranslation = Addon_Modes,' '}' | mod_file 101/mods/Addon/42/media/sandbox-options.txt
   printf '%s\n' 'Sandbox_EN = {' '    Sandbox_Addon_Flag = "The \"best\" flag", -- why' '}' | mod_file 101/mods/Addon/42/media/lua/shared/Translate/EN/Sandbox_EN.txt
   make_mod 102 "Old Mod" OldMod "" "Old Map"
   make_mod 102 "Old Mod" OldMod backup
   make_mod 104 Hidden HiddenMod 42
-  printf '%s\n' 'option Hidden.X' '{' 'type = integer,' 'default = 3,' 'translation = Hidden_X,' '}' | mod_file 104/mods/Hidden/42/media/sandbox-options.txt
+  printf '%s\n' 'VERSION = 1,' 'option Hidden.X' '{' 'type = integer,' 'min = 0,' 'max = 9,' 'default = 3,' 'translation = Hidden_X,' '}' | mod_file 104/mods/Hidden/42/media/sandbox-options.txt
   echo '{"Sandbox_Hidden_X": "X",}' | mod_file 104/mods/Hidden/42/media/lua/shared/Translate/EN/Sandbox.json
   make_mod 106 Loose LooseMod 42.0
   make_mod 106 Loose LooseMod 42.5
+  # The game reads only the version folder's sandbox options when it has some. An option's id is the
+  # word after "option", keys and types match exactly, the first value of a key counts, each type needs
+  # its values (ints within Java's range), and a value is only what ends at a comma. It skips the character after a closing brace, so after "}," it reads a block
+  # of type "," and stops.
+  mod_file 106/mods/Loose/42.5/media/sandbox-options.txt <<'EOF'
+VERSION = 1,
+option Loose.Spaced = {
+	type = boolean, default = true,
+}
+option Loose.Key { Type = boolean, default = true, }
+option Loose.Cased { type = Boolean, default = true, }
+option Loose.NoMax { type = integer, min = 0, default = 1, }
+option Loose.Big { type = integer, min = 0, max = 99999999999, default = 1, }
+option Loose.Twice { type = boolean, default = true, default = false, }
+option Loose.Word { type = double, min = 0, max = 1, default = half, }
+option Loose.NoValues { type = enum, numValues = 0, default = 1, }
+option Loose.Last { type = string, default = a }
+option Loose.Number { type = double, min = -1, max = 1e3, default = .5, }
+option Loose.Str { type = string, default = a b , page = P,}, option Loose.Skipped { type = boolean, default = true, }
+option Loose.After { type = boolean, default = true, }
+EOF
+  printf '%s\n' 'VERSION = 1,' 'option Loose.Common' '{' 'type = boolean,' 'default = true,' '}' | mod_file 106/mods/Loose/common/media/sandbox-options.txt
+  make_mod 106 "No Version" NoVersionMod 42
+  printf '%s\n' 'option NoVersion.X' '{' 'type = boolean,' 'default = true,' '}' | mod_file "106/mods/No Version/42/media/sandbox-options.txt"
   # A mod.info without an id still brings its maps and options.
   make_mod 106 "No Id" "" 42 "No Id Map"
-  printf '%s\n' 'option NoId.X' '{' 'type = integer,' 'default = 3,' '}' | mod_file "106/mods/No Id/42/media/sandbox-options.txt"
+  printf '%s\n' 'VERSION = 1,' 'option NoId.X' '{' 'type = integer,' 'min = 0,' 'max = 9,' 'default = 3,' '}' | mod_file "106/mods/No Id/common/media/sandbox-options.txt"
   # The game rejects these, or can't load them by themselves, so their options don't count. Their maps
   # do: the page takes them out of Map=.
   make_mod 108 Bad BadMod 42 "Bad Map"
@@ -435,7 +459,7 @@ EOF
   printf '%s\n' 'id=SpacesMod' 'require=\A, \B' | mod_file 108/mods/Spaces/42/mod.info
   make_mod 108 Capped CappedMod 42 "Capped Map"
   printf '%s\n' 'id=CappedMod' 'versionMax=42.20' | mod_file 108/mods/Capped/42/mod.info
-  printf '%s\n' 'option Capped.X' '{' 'type = integer,' 'default = 3,' '}' | mod_file 108/mods/Capped/42/media/sandbox-options.txt
+  printf '%s\n' 'VERSION = 1,' 'option Capped.X' '{' 'type = boolean,' 'default = true,' '}' | mod_file 108/mods/Capped/42/media/sandbox-options.txt
   make_mod 108 examplemod ExampleMod 42
   set_ini_value "${SERVER}/pzserver.ini" Mods '\MultiMod;2392709985\TsarLib; \OldMod;'
   set_ini_value "${SERVER}/pzserver.ini" Map 'Variant Map;Muldraugh, KY'
@@ -456,22 +480,23 @@ EOF
   expect_eq "$(jq -c .server "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
   expect_eq "$(jq -c .collections "${out}")" '[{"id":"900","title":"Item 900","children":["101","910","102"]},{"id":"910","title":"Item 910","children":["103","920"]},{"id":"920","title":"Item 920","children":[]}]'
   expect_eq "$(jq -c '[.items[] | [.id, .available, .downloaded, (.mods | map(.folder))]]' "${out}")" \
-    '[["101",true,true,["Addon","Multi Version"]],["102",true,true,["Old Mod"]],["103",true,false,[]],["104",false,true,["Hidden"]],["105",true,false,[]],["106",true,true,["Loose","No Id"]],["108",true,true,["Bad","Capped","Spaces"]]]'
+    '[["101",true,true,["Addon","Multi Version"]],["102",true,true,["Old Mod"]],["103",true,false,[]],["104",false,true,["Hidden"]],["105",true,false,[]],["106",true,true,["Loose","No Id","No Version"]],["108",true,true,["Bad","Capped","Spaces"]]]'
   expect_eq "$(jq -c '.items[0] | [.title, .description, .tags, .updated, .size, .requiredItems]' "${out}")" '["Item 101","[b]About 101[/b]",["Build 42"],1700000000,4096,null]'
   expect_eq "$(jq -c '.items[3] | [.title, .description, .tags, .updated, .size]' "${out}")" '[null,null,null,null,null]'
   expect_eq "$(jq -c '.items[3].mods[0].sandbox | map([.env, .label])' "${out}")" '[["SANDBOX_Hidden__X",null]]'
   expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox)' "${out}")" \
     '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"error":null,"require":["StarlitLibrary","2392709985TsarLib","PlainReq"],"requireEntries":["StarlitLibrary","2392709985TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
   expect_eq "$(jq -c '.items[0].mods[1].sandbox | map([.env, .type, .default, .current])' "${out}")" \
-    '[["SANDBOX_Multi__Mode","enum","1","2"],["SANDBOX_Multi__Strength","integer","10",null],["SANDBOX_Multi__Shared","double","1.5",null],["SANDBOX_MultiNoDot","boolean","true","false"],["SANDBOX_Multi__CommonOnly","string","Base.Axe;Base.Saw","a \"b\""]]'
+    '[["SANDBOX_Multi__Mode","enum","1","2"],["SANDBOX_Multi__Strength","integer","10",null],["SANDBOX_Multi__Shared","double","1.5",null],["SANDBOX_MultiNoDot","boolean","true","false"]]'
   expect_eq "$(jq -c '.items[0].mods[1].sandbox[0:2]' "${out}")" \
     '[{"env":"SANDBOX_Multi__Mode","option":"Multi.Mode","type":"enum","default":"1","min":null,"max":null,"values":["Easy","2","Hard"],"page":"Multi","pageLabel":"Multi settings","label":"Mode","tooltip":null,"current":"2"},{"env":"SANDBOX_Multi__Strength","option":"Multi.Strength","type":"integer","default":"10","min":"-5","max":"50","values":null,"page":"Multi","pageLabel":"Multi settings","label":null,"tooltip":"How strong","current":null}]'
-  expect_eq "$(jq -c '.items[0].mods[1].sandbox[4] | [.page, .pageLabel, .label]' "${out}")" '["Elsewhere",null,null]'
   expect_eq "$(jq -c '.items[0].mods[0] | [.id, .versionFolder, .sandbox[0].label, .sandbox[0].values, .sandbox[1].values]' "${out}")" '[null,"42","The \"best\" flag",null,null]'
   expect_eq "$(jq -c '.items[1].mods[0] | [.id, .name, .versionFolder, .error, .maps, .sandbox]' "${out}")" '["OldMod","Old Mod",null,"no mod.info for this game version",[],[]]'
   expect_eq "$(jq -c '.items[6].mods | map([.id, .versionFolder, .error, .require, .requireEntries, .maps, (.sandbox | length)])' "${out}")" \
     '[["BadMod","42","its mod.info has versionMin=42, which is not a major.minor version like 42.13",[],[],["Bad Map"],0],["CappedMod","42",null,[],[],["Capped Map"],0],["SpacesMod","42",null,["A","B"],["A"," B"],["Spaces Map"],0]]'
-  expect_eq "$(jq -c '.items[5].mods[0].versionFolder' "${out}")" '"42.5"'
+  expect_eq "$(jq -c '.items[5].mods[0] | [.versionFolder, (.sandbox | map([.option, .type, .default, .min, .max, .page]))]' "${out}")" \
+    '["42.5",[["Loose.Spaced","boolean","true",null,null,null],["Loose.Twice","boolean","true",null,null,null],["Loose.Number","double",".5","-1","1e3",null],["Loose.Str","string","a b",null,null,"P"]]]'
+  expect_eq "$(jq -c '.items[5].mods[2].sandbox' "${out}")" '[]'
   expect_eq "$(jq -c '.items[5].mods[1] | [.id, .versionFolder, .maps, [.sandbox[].env]]' "${out}")" '[null,"42",["No Id Map"],["SANDBOX_NoId__X"]]'
   [ -s "${WORK}/err" ] && fail "list-mods wrote to stderr: $(cat "${WORK}/err")"
 
@@ -497,7 +522,7 @@ EOF
   echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
   PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed on Build 41"
   expect_eq "$(jq -c '[.gameVersion, (.items[] | select(.id | length == 3) | .mods[] | [.folder, .versionFolder, .modVersion, .maps])]' "${out}")" \
-    '["41.78.16",["Addon",null,null,[]],["Multi Version","",null,[]],["Old Mod","",null,["Old Map"]],["Hidden",null,null,[]],["Loose",null,null,[]],["No Id",null,null,[]],["Bad",null,null,[]],["Capped",null,null,[]],["Spaces",null,null,[]]]'
+    '["41.78.16",["Addon",null,null,[]],["Multi Version","",null,[]],["Old Mod","",null,["Old Map"]],["Hidden",null,null,[]],["Loose",null,null,[]],["No Id",null,null,[]],["No Version",null,null,[]],["Bad",null,null,[]],["Capped",null,null,[]],["Spaces",null,null,[]]]'
 
   # Nothing to look up needs no network.
   set_ini_value "${SERVER}/pzserver.ini" WorkshopItems ''

@@ -81,11 +81,14 @@ mod_info_rows "${version}" "${content_dir}"/*/mods > "${tmp}/mods"
 
 {
   # The sandbox options and English translations of the mods that load by themselves
+  versioned=""
   awk -F '\t' '$4 == 1 && $19 == ""' "${tmp}/mods" | mod_dirs | while IFS=$'\t' read -r item folder rank dir; do
     translate="${dir}/media/lua/shared/Translate/EN"
-    if [ -f "${dir}/media/sandbox-options.txt" ]; then
+    # The game reads the sandbox options of the version folder, or else those of common/.
+    if [ -f "${dir}/media/sandbox-options.txt" ] && [ "${versioned}" != "${item}/${folder}" ]; then
       printf 'options\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${dir}/media/sandbox-options.txt"
     fi
+    [ "${rank}" = 0 ] && [ -f "${dir}/media/sandbox-options.txt" ] && versioned="${item}/${folder}"
     if [ -f "${translate}/Sandbox.json" ]; then
       printf 'json\t%s/%s\t%s\t%s\n' "${item}" "${folder}" "${rank}" "${translate}/Sandbox.json"
     elif [ -f "${translate}/Sandbox_EN.txt" ]; then
@@ -105,52 +108,64 @@ mod_info_rows "${version}" "${content_dir}"/*/mods > "${tmp}/mods"
 } | LC_ALL=C awk -F '\t' '
   function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
   function clean(s) { gsub(/\t/, " ", s); return s }
-  # option <name> { key = value, ... }, with /* */ comments. Statements end at commas or braces, not
-  # at line ends. Options of an unknown type are no setting the game creates.
-  function options(key, rank, path,   line, n, parts, p, s, i, j, rest, comment, name, open, field, type) {
-    name = ""
-    open = 0
-    comment = 0
+  # Reads sandbox-options.txt like the game (CustomSandboxOptions, ScriptParser.readBlock): the lines
+  # joined without separators, /* */ comments removed, then blocks "<type> <id> {" holding values that
+  # each end at a comma. Text before a closing brace is no value, and the character right after it is
+  # skipped. Only a file with VERSION = 1 counts, and only its option blocks before any other kind of
+  # block. Keys and types match exactly, and each type needs certain values.
+  # Java ints; the game takes the smallest one as missing.
+  function int_ok(v) { v = trim(v); return v ~ /^[+-]?[0-9]+$/ && v + 0 > -2147483648 && v + 0 <= 2147483647 }
+  function double_ok(v) { return trim(v) ~ /^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?[fFdD]?$/ }
+  function options(key, rank, path,   line, s, i, j, n, c, start, depth, head, ss, version, stopped, id, type, field, value, out) {
+    s = ""
     while ((getline line < path) > 0) {
-      sub(/\r$/, "", line)
-      if (comment) {
-        if ((i = index(line, "*/")) == 0) continue
-        line = substr(line, i + 2)
-        comment = 0
-      }
-      while ((i = index(line, "/*")) > 0) {
-        rest = substr(line, i + 2)
-        if ((j = index(rest, "*/")) == 0) {
-          line = substr(line, 1, i - 1)
-          comment = 1
-          break
-        }
-        line = substr(line, 1, i - 1) substr(rest, j + 2)
-      }
-      gsub(/[{}]/, ",&,", line)
-      n = split(line, parts, ",")
-      for (p = 1; p <= n; p++) {
-        s = trim(parts[p])
-        if (s ~ /^option[ \t]/) {
-          name = trim(substr(s, 7))
-          open = 0
-          split("", field)
-        } else if (name != "" && s == "{") {
-          open = 1
-        } else if (name != "" && s == "}") {
-          type = tolower(field["type"])
-          if (open && type ~ /^(boolean|integer|double|enum|string)$/) {
-            print "option\t" key "\t" rank "\t" (++seq) "\t" clean(name) "\t" type "\t" clean(field["default"]) "\t" \
-              clean(field["min"]) "\t" clean(field["max"]) "\t" clean(field["page"]) "\t" clean(field["translation"]) "\t" \
-              clean(field["valuetranslation"]) "\t" clean(field["numvalues"])
-          }
-          name = ""
-        } else if (open && (i = index(s, "=")) > 1) {
-          field[tolower(trim(substr(s, 1, i - 1)))] = trim(substr(s, i + 1))
-        }
-      }
+      gsub(/\r/, "", line)
+      s = s line
     }
     close(path)
+    while ((i = index(s, "/*")) > 0 && (j = index(substr(s, i + 2), "*/")) > 0) s = substr(s, 1, i - 1) substr(s, i + j + 3)
+    n = length(s)
+    start = 1
+    depth = 0
+    version = ""
+    stopped = 0
+    out = ""
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (c == "{") {
+        if (++depth == 1) {
+          head = trim(substr(s, start, i - start))
+          split(head, ss, /[ \t\n]+/)
+          if (tolower(ss[1]) != "option") stopped = 1
+          id = ss[2]
+          split("", field)
+        }
+        start = i + 1
+      } else if (c == "}") {
+        if (depth == 0) break
+        if (depth-- == 1 && !stopped && id != "") {
+          type = ("type" in field) ? trim(field["type"]) : ""
+          if ((type == "boolean" || type == "string") && ("default" in field) ||
+              type == "integer" && int_ok(field["min"]) && int_ok(field["max"]) && int_ok(field["default"]) ||
+              type == "double" && double_ok(field["min"]) && double_ok(field["max"]) && double_ok(field["default"]) ||
+              type == "enum" && int_ok(field["numValues"]) && trim(field["numValues"]) + 0 > 0 && int_ok(field["default"]) && trim(field["default"]) + 0 > 0) {
+            out = out "option\t" key "\t" rank "\t" (++seq) "\t" clean(id) "\t" type "\t" clean(trim(field["default"])) "\t" \
+              clean(trim(field["min"])) "\t" clean(trim(field["max"])) "\t" clean(trim(field["page"])) "\t" clean(trim(field["translation"])) "\t" \
+              clean(trim(field["valueTranslation"])) "\t" clean(trim(field["numValues"])) "\n"
+          }
+        }
+        start = i + 1
+        i++
+      } else if (c == ",") {
+        value = substr(s, start, i - start)
+        if ((j = index(value, "=")) > 1) {
+          if (depth == 0 && trim(substr(value, 1, j - 1)) == "VERSION" && version == "") version = int_ok(substr(value, j + 1)) ? trim(substr(value, j + 1)) + 0 : -1
+          else if (depth == 1 && !(trim(substr(value, 1, j - 1)) in field)) field[trim(substr(value, 1, j - 1))] = substr(value, j + 1)
+        }
+        start = i + 1
+      }
+    }
+    if (version == 1) printf "%s", out
   }
   # JSON has no line breaks inside strings, so the file goes on one line for jq to parse.
   function json(key, rank, path,   line) {
