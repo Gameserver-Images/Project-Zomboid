@@ -29,8 +29,8 @@ watched_dirs() {
 }
 
 # GAME_FILE_WATCHER=auto turns the watcher off when the game could run out of watches, true keeps it
-# on and false keeps it off. Off preloads a library that only stops the JDK from creating a
-# WatchService, which the game copes with.
+# on and false keeps it off. Off preloads a library that makes the JDK's inotify watches succeed
+# without watching anything.
 configure_file_watcher() {
   # $1 = file holding the host's inotify watch limit, $2 = INI file, $3 = workshop content dir,
   # $4 = what load_mods printed
