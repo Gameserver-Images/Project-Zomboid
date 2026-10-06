@@ -4,8 +4,9 @@ GAME_FILE_WATCHER	The game's file watcher, which reloads game and mod files that
 ADMINUSERNAME	Admin account name created on the first start (default: admin).
 ADMINPASSWORD	Admin account password. Required on the first start, when the server creates its database; ignored afterwards.
 ADMINPASSWORD_FILE	File holding the admin password; takes precedence over ADMINPASSWORD.
-WORKSHOP_IDS	Workshop item and collection IDs separated by ';'. Collections are expanded and written to WorkshopItems. Set it empty to clear WorkshopItems.
+WORKSHOP_IDS	Workshop item and collection IDs separated by ';'. Collections are expanded and written to WorkshopItems, and items not downloaded yet are downloaded with SteamCMD before the server starts. Set it empty to clear WorkshopItems.
 STEAM_API_KEY	Steam Web API key, only needed to expand private or unlisted collections in WORKSHOP_IDS and for list-mods to list each item's required items.
+MOD_UPDATE_CHECK	How often the server checks the workshop items it started with for updates, such as 15m or 1h (s, m or h; empty, the default, turns it off), since players can't join while it has an older version of an item. When one has an update, the server warns the players online 5 minutes ahead (or the interval, when that is shorter) and quits, saving the world, to download it when it starts again. That needs a restart policy such as unless-stopped, as the container exits with code 0.
 SERVERPRESET	Sandbox preset (a file name in media/lua/shared/Sandbox) used to create the SandboxVars file when it does not exist.
 SERVERPRESETREPLACE	Overwrite an existing SandboxVars file with SERVERPRESET on every start (true/false).
 CONFIG_STRICT	Refuse to start when an INI_ or SANDBOX_ variable matches no setting or has a value of the wrong type (true/false).

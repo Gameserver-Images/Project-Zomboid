@@ -31,26 +31,55 @@ new_env() {
   cp "${REPO}/smoke/fixtures/pzserver_spawnregions.lua" "${SERVER}/pzserver_spawnregions.lua"
   touch "${HOMEDIR}/Zomboid/db/pzserver.db"
   export STEAMAPPID=380870 STEAMCMDDIR="${WORK}/home/steamcmd"
-  mkdir -p "${STEAMCMDDIR}"
-  # Logs its arguments and installs a fake game with build FAKE_BUILD. Like the real one, its output
-  # doesn't end with a newline.
+  mkdir -p "${STEAMCMDDIR}" "${STEAMAPPDIR}/jre64/bin"
+  # Logs its arguments, installs a fake game with build FAKE_BUILD and downloads workshop items, from
+  # HOMEDIR/workshop when they are there, but not those in FAKE_WORKSHOP_FAIL, which leave their folder
+  # behind with FAKE_WORKSHOP_PARTIAL, and puts those in FAKE_WORKSHOP_ELSEWHERE in another folder.
+  # Like the real one, its output doesn't end with a newline.
   cat > "${STEAMCMDDIR}/steamcmd.sh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "${HOMEDIR}/steamcmd-calls"
 [ -n "${FAKE_STEAM_FAIL:-}" ] && { echo "ERROR! Failed to install app '380870' (No connection)"; exit 8; }
 [ -n "${FAKE_STEAM_SILENT:-}" ] && exit 0
 dir="$2"
-mkdir -p "${dir}/steamapps"
-[ -f "${dir}/start-server.sh" ] || printf '#!/bin/bash\n' > "${dir}/start-server.sh"
-chmod +x "${dir}/start-server.sh"
-printf '"AppState"\n{\n\t"appid"\t\t"380870"\n\t"buildid"\t\t"%s"\n}\n' "${FAKE_BUILD:-100}" > "${dir}/steamapps/appmanifest_380870.acf"
-printf "Success! App '380870' fully installed.\nUnloading Steam API...OK"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    +app_update)
+      mkdir -p "${dir}/steamapps"
+      [ -f "${dir}/start-server.sh" ] || printf '#!/bin/bash\n' > "${dir}/start-server.sh"
+      chmod +x "${dir}/start-server.sh"
+      printf '"AppState"\n{\n\t"appid"\t\t"380870"\n\t"buildid"\t\t"%s"\n}\n' "${FAKE_BUILD:-100}" > "${dir}/steamapps/appmanifest_380870.acf"
+      printf "Success! App '380870' fully installed.\n" ;;
+    +workshop_download_item)
+      folder="${dir}/steamapps/workshop/content/$2/$3"
+      [[ " ${FAKE_WORKSHOP_ELSEWHERE:-} " == *" $3 "* ]] && folder="${dir}/elsewhere/$3"
+      if [[ " ${FAKE_WORKSHOP_FAIL:-} " == *" $3 "* ]]; then
+        [ -n "${FAKE_WORKSHOP_PARTIAL:-}" ] && mkdir -p "${folder}"
+        printf 'ERROR! Download item %s failed (Failure).\n' "$3"
+      else
+        mkdir -p "${folder}/mods"
+        [ -d "${HOMEDIR}/workshop/$3" ] && cp -r "${HOMEDIR}/workshop/$3/." "${folder}/"
+        printf 'Success. Downloaded item %s to "%s" (4096 bytes)\n' "$3" "${folder}"
+      fi
+      shift 2 ;;
+  esac
+  shift
+done
+printf 'Unloading Steam API...OK'
 EOF
   chmod +x "${STEAMCMDDIR}/steamcmd.sh"
+  # The game's Java running the version reader, which reads FAKE_GAME_VERSION here. A JVM can warn on
+  # stderr.
+  printf '%s\n' '{"mainClass": "zombie/network/GameServer", "classpath": ["java/.", "java/projectzomboid.jar"]}' > "${STEAMAPPDIR}/ProjectZomboid64.json"
+  cat > "${STEAMAPPDIR}/jre64/bin/java" <<'EOF'
+#!/bin/bash
+[ -n "${FAKE_GAME_VERSION:-}" ] || { echo "zombie/core/Core.class has no int constant buildVersion" >&2; exit 1; }
+echo "OpenJDK 64-Bit Server VM warning: a warning" >&2
+echo "${FAKE_GAME_VERSION}"
+EOF
+  chmod +x "${STEAMAPPDIR}/jre64/bin/java"
   # shellcheck source=scripts/configure.sh
   . "${SCRIPT_DIR}/configure.sh"
-  # shellcheck source=scripts/lib/game.sh
-  . "${SCRIPT_DIR}/lib/game.sh"
 }
 
 test_ini() {
@@ -134,9 +163,9 @@ make_mod() {
 test_maps() {
   TEST=maps
   new_env
-  local content="${STEAMAPPDIR}/steamapps/workshop/content/108600" ini="${SERVER}/pzserver.ini" spawn="${SERVER}/pzserver_spawnregions.lua"
+  local content="${STEAMAPPDIR}/steamapps/workshop/content/108600" ini="${SERVER}/pzserver.ini" spawn="${SERVER}/pzserver_spawnregions.lua" version=""
   # As on a start: what load_mods makes of Mods= decides the maps.
-  maps() { apply_mod_maps "${ini}" "${spawn}" "${content}" "$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> "${WORK}/err")" > /dev/null; }
+  maps() { apply_mod_maps "${ini}" "${spawn}" "${content}" "$(load_mods "${ini}" "${content}" "${version}" 2> "${WORK}/err")" "${version}" > /dev/null; }
   make_mod 100 RavenCreek RavenCreekMod 42 "Raven Creek"
   make_mod 200 Bedford BedfordFalls 42 "Bedford Falls"
   make_mod 300 Unused UnusedMod 42 "Unused Map"
@@ -154,12 +183,12 @@ test_maps() {
   set_ini_value "${ini}" Mods '\RavenCreekMod;BedfordFalls;\VanillaPatch;\Old41Mod;\MultiMod;\NewId'
   set_ini_value "${ini}" Map 'Admin Map;Unused Map;Muldraugh, KY'
 
-  # Before the first start the game version, and with it the version folders, is unknown.
+  # Without the game version the version folders are unknown.
   maps
   expect_line "${ini}" 'Map=Admin Map;Unused Map;Muldraugh, KY'
   grep -q 'Raven Creek' "${spawn}" && fail "spawnregions changed without a game version"
 
-  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  version=42.21.0
   maps
   expect_line "${ini}" 'Map=Admin Map;Raven Creek;Raven Creek Extra;Bedford Falls;New Map;Renamed Map;Muldraugh, KY'
   expect_line "${spawn}" '		{ name = "Raven Creek", file = "media/maps/Raven Creek/spawnpoints.lua" },'
@@ -246,7 +275,7 @@ test_maps() {
   grep -q 'Wait Map' "${spawn}" && fail "the spawn region of a mod that doesn't load was kept"
 
   # Build 41 loads the mod folder itself, and keeps backslashes in Mods=.
-  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  version=41.78.16
   set_ini_value "${ini}" WorkshopItems '100;500'
   set_ini_value "${ini}" Mods '\Old41Mod'
   maps
@@ -267,8 +296,8 @@ test_map_checks() {
   TEST='map checks'
   new_env
   local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600" vanilla="${STEAMAPPDIR}/media/maps/Muldraugh, KY"
-  local handler="${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
-  check() { check_maps "${ini}" "$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> /dev/null)" > "${WORK}/out" 2> "${WORK}/err"; }
+  local handler="${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua" version=""
+  check() { check_maps "${ini}" "$(load_mods "${ini}" "${content}" "${version}" 2> /dev/null)" "${version}" > "${WORK}/out" 2> "${WORK}/err"; }
   zones() {
     # $1 = zone file, $2.. = its zones, one per line from line 2 on, in the table the game reads
     local table=objects
@@ -317,11 +346,11 @@ test_map_checks() {
   set_ini_value "${ini}" Mods '\HunterMod;\GreenMod;\RavenMod;\RavenExtraMod;\KingMod'
   set_ini_value "${ini}" Map "Greenport;Raven Creek;hunter's_base;Muldraugh, KY"
 
-  # Before the first start the game version and with it the files the game reads are unknown.
+  # Without the game version the files the game reads are unknown.
   check
   [ -s "${WORK}/out" ] || [ -s "${WORK}/err" ] && fail "checked the maps without a game version: $(cat "${WORK}/out" "${WORK}/err")"
 
-  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  version=42.21.0
   local found="Warning: the game fails on the zone at ${hunter}/objects.lua:4 and stops loading map zones there on every start."
   local what='(car spawns, animals, basements, water and the like)'
   check
@@ -467,11 +496,11 @@ Warning: the maps Local A and Local B share 3 cells (30_30, 30_31, 30_32).
   # Keys can be in brackets, a type must be a string, and only the properties table holds properties.
   # Comments end where Lua ends them, and a long string can hold anything.
   local file zone rows
-  rows="$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> /dev/null)"
+  rows="$(load_mods "${ini}" "${content}" "${version}" 2> /dev/null)"
   while IFS='|' read -r file line zone; do
     file="${dir}/${file}"
     zones "${file}" "$(printf '%b' "${zone}")"
-    check_maps "${ini}" "${rows}" > /dev/null 2> "${WORK}/err"
+    check_maps "${ini}" "${rows}" "${version}" > /dev/null 2> "${WORK}/err"
     if [ "${line}" = - ]; then
       [ -s "${WORK}/err" ] && fail "warned about zones the game doesn't fail on: ${zone}"
     else
@@ -507,7 +536,7 @@ EOF
 
   # Build 41 reads the mod folder itself and takes a shared cell from the earlier map; its zones aren't
   # checked.
-  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  version=41.78.16
   make_mod 600 Old OldMod "" "Old Map"
   make_mod 700 Older OlderMod "" "Older Map"
   cells "${content}/600/mods/Old/media/maps/Old Map" 3_3
@@ -625,7 +654,7 @@ test_list_mods() {
   new_env
   fake_steam
   local out="${WORK}/mods.json" multi="101/mods/Multi Version"
-  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  export FAKE_GAME_VERSION=42.21.0
   # Item 101 has a Build 41 mod.info, Build 42 versions up to one newer than the game, a folder that is
   # no version, and a second mod. Item 102 only has Build 41 and a folder that is no version, items 106
   # and 108 are on disk only, and 106 has 42.0 and 42.5, which is older than 42.21.
@@ -786,7 +815,7 @@ EOF
   (PATH="${WORK}/bin:${PATH}" FAKE_STEAM_PARTIAL=1000 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> /dev/null) && fail "list-mods succeeded with an incomplete first batch"
 
   # Build 41 loads the mod.info in the mod folder itself.
-  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  FAKE_GAME_VERSION=41.78.16
   PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed on Build 41"
   expect_eq "$(jq -c '[.gameVersion, (.items[] | select(.id | length == 3) | .mods[] | [.folder, .versionFolder, .modVersion, .maps])]' "${out}")" \
     '["41.78.16",["Addon",null,null,[]],["Multi Version","",null,[]],["Old Mod","",null,["Old Map"]],["Hidden",null,null,[]],["Loose",null,null,[]],["No Id",null,null,[]],["No Version",null,null,[]],["Bad",null,null,[]],["Capped",null,null,[]],["Spaces",null,null,[]]]'
@@ -806,9 +835,10 @@ EOF
   [ -s "${out}" ] && fail "list-mods printed output without the item details"
   grep -q '^Error: could not get the workshop item details' "${WORK}/err" || fail "the details failure was not explained"
 
-  rm "${HOMEDIR}/Zomboid/server-console.txt"
+  unset FAKE_GAME_VERSION
   (PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without a game version"
-  grep -q 'Start the server once first' "${WORK}/err" || fail "the unknown game version was not explained"
+  [ -s "${out}" ] && fail "list-mods printed output without a game version"
+  expect_eq "$(cat "${WORK}/err")" 'Error: could not read the game version from the game files: zombie/core/Core.class has no int constant buildVersion'
 }
 
 test_mod_folders() {
@@ -929,8 +959,7 @@ test_mod_folders() {
 test_mod_warnings() {
   TEST=warnings
   new_env
-  local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600"
-  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600" version=42.21.0
   printf '%s\r\n' 'id=ModA' 'require=\ModB' 'loadModAfter=ModC,\ModB' 'incompatible=\ModD' | mod_file 201/mods/A/42/mod.info
   make_mod 202 B ModB 42
   # The hint for 2392709985\ModB takes the longest run of digits as the workshop ID.
@@ -946,7 +975,7 @@ test_mod_warnings() {
   printf '%s\r\n' 'id=ModLocal' 'require=\ModB' > "${HOMEDIR}/Zomboid/mods/My Local/42/mod.info"
   printf '%s\r\n' 'id=ModLocal41' > "${HOMEDIR}/Zomboid/mods/Old Local/mod.info"
   printf '%s\n' 'id=ModH' 'versionMin=42.0' 'versionMax=42.20.9' | mod_file 208/mods/H/common/mod.info
-  warnings() { load_mods "${ini}" "${content}" "$(console_game_version)" > /dev/null 2> "${WORK}/err"; }
+  warnings() { load_mods "${ini}" "${content}" "${version}" > /dev/null 2> "${WORK}/err"; }
   loaded() { load_mods "${ini}" "${content}" 42.21.0 2> "${WORK}/err" | awk -F '\t' '$1 == "load" { print $6 }' | paste -sd ' '; }
   local stops='so the server never finishes loading mods and stops with a StackOverflowError'
 
@@ -1040,7 +1069,7 @@ Warning: Mods= has 301\ModX, which the server reads as the mod ID 301ModX; write
   [ -s "${WORK}/err" ] && fail "warned about the copy of a mod that the game doesn't use: $(cat "${WORK}/err")"
 
   # Build 41 keeps the backslashes in Mods=.
-  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  version=41.78.16
   set_ini_value "${ini}" Mods '\ModLocal41;ModLocal41;\Ghost'
   warnings
   expect_eq "$(cat "${WORK}/err")" 'Warning: Mods= has \ModLocal41, which Build 41 reads as the mod ID \ModLocal41, backslash included; write ModLocal41.
@@ -1050,7 +1079,7 @@ Warning: Mods= enables \Ghost, but neither a downloaded workshop item nor Zomboi
   # only once every item is downloaded.
   set_ini_value "${ini}" WorkshopItems '201;202;203;204;205;206;207'
   set_ini_value "${ini}" Mods '\ModA;2392709985\ModB;\ModE;\ModC;\ModD;\ModF;\Ghost;\ModA;\ModLocal'
-  rm "${HOMEDIR}/Zomboid/server-console.txt"
+  version=""
   warnings
   expect_eq "$(cat "${WORK}/err")" 'Warning: Mods= has 2392709985\ModB, which the server reads as the mod ID 2392709985ModB; write \ModB.
 Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
@@ -1068,7 +1097,7 @@ test_file_watcher() {
   watcher() {
     # $1 = inotify watch limit; prints the LD_PRELOAD the game gets
     printf '%s\n' "$1" > "${limit}"
-    (configure_file_watcher "${limit}" "${ini}" "${content}" "$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> /dev/null)" \
+    (configure_file_watcher "${limit}" "${ini}" "${content}" "$(load_mods "${ini}" "${content}" "${version}" 2> /dev/null)" \
       > "${WORK}/out" 2> "${WORK}/err"; printf '%s' "${LD_PRELOAD:-}")
   }
   quiet() {
@@ -1078,7 +1107,7 @@ test_file_watcher() {
   # Here the game's media folder holds media, lua, shared and Sandbox, and a link the game doesn't follow.
   mkdir -p "${HOMEDIR}/Zomboid/messaging"
   ln -s "${STEAMAPPDIR}/media/lua" "${STEAMAPPDIR}/media/linked"
-  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  local version=42.21.0
   make_mod 100 RavenCreek RavenCreekMod 42 "Raven Creek"
   mkdir -p "${content}/100/mods/RavenCreek/common/media/lua/client"
   mkdir -p "${HOMEDIR}/Zomboid/mods/Local/42/media/lua"
@@ -1128,7 +1157,7 @@ test_file_watcher() {
   grep -q '^Warning: the game would watch 17 folders' "${WORK}/err" || fail "the folders it could count did not get the warning"
   [ -s "${WORK}/out" ] && fail "printed more than the warning: $(cat "${WORK}/out")"
   set_ini_value "${ini}" WorkshopItems '100;300'
-  rm "${HOMEDIR}/Zomboid/server-console.txt"
+  version=""
   expect_eq "$(watcher 1000)" "${shim}"
   grep -q "^Config: the game's file watcher is off" "${WORK}/out" || fail "the unknown game version did not turn the watcher off"
   set_ini_value "${ini}" Mods ''
@@ -1188,9 +1217,11 @@ test_configure() {
     MEMORY=2048m DEBUG=true ADMINUSERNAME=boss PORT=17000 STEAMVAC=TRUE WORKSHOP_IDS="" INI_Mods='\Ghost;\LocalMap'
   mkdir -p "${HOMEDIR}/Zomboid/mods/Local/42/media/maps/Local Map"
   printf 'id=LocalMap\n' > "${HOMEDIR}/Zomboid/mods/Local/42/mod.info"
-  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  export FAKE_GAME_VERSION=42.21.0
   configure_file_watcher() { printf '%s\n' "$@" > "${WORK}/watcher"; }
   configure_server > "${WORK}/out" 2> "${WORK}/err"
+  expect_line "${WORK}/out" 'Game: version 42.21.0'
+  [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "SteamCMD started without workshop items"
   # The startup warnings, the maps and the file watcher follow the Mods= of this start.
   expect_line "${WORK}/err" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
   expect_line "${WORK}/out" 'Config: Map is Local Map;Muldraugh, KY'
@@ -1218,6 +1249,232 @@ test_configure() {
   unset ADMINPASSWORD
   (configure_server > /dev/null 2> "${WORK}/err") && fail "the first start went ahead without ADMINPASSWORD"
   grep -q 'ADMINPASSWORD' "${WORK}/err" || fail "the missing ADMINPASSWORD was not explained"
+}
+
+test_first_start() {
+  TEST='first start'
+  new_env
+  fake_steam
+  PATH="${WORK}/bin:${PATH}"
+  # The game has written nothing yet. Item 500 on the workshop has a map with spawn points.
+  rm "${SERVER}/pzserver.ini" "${SERVER}/pzserver_spawnregions.lua" "${SERVER}/pzserver_SandboxVars.lua" "${HOMEDIR}/Zomboid/db/pzserver.db"
+  local ini="${SERVER}/pzserver.ini" spawn="${SERVER}/pzserver_spawnregions.lua" points="${SERVER}/pzserver_spawnpoints.lua"
+  local item="${HOMEDIR}/workshop/500/mods/River/42" twiggy=$'\t\t{ name = "Twiggy\'s Bar", serverfile = "pzserver_spawnpoints.lua" },'
+  mkdir -p "${item}/media/maps/River Map"
+  printf 'id=RiverMap\n' > "${item}/mod.info"
+  touch "${item}/media/maps/River Map/spawnpoints.lua"
+  configure_file_watcher() { :; }
+  # What the game writes (ServerOptions)
+  local regions river=$'\t\t{ name = "River Map", file = "media/maps/River Map/spawnpoints.lua" },'
+  regions="$(cat <<'EOF'
+function SpawnRegions()
+	return {
+		{ name = "Muldraugh, KY", file = "media/maps/Muldraugh, KY/spawnpoints.lua" },
+		{ name = "West Point, KY", file = "media/maps/West Point, KY/spawnpoints.lua" },
+		{ name = "Rosewood, KY", file = "media/maps/Rosewood, KY/spawnpoints.lua" },
+		{ name = "Riverside, KY", file = "media/maps/Riverside, KY/spawnpoints.lua" },
+		-- Uncomment the line below to add a custom spawnpoint for this server.
+--		{ name = "Twiggy's Bar", serverfile = "pzserver_spawnpoints.lua" },
+	}
+end
+EOF
+)"
+  local spawn_points=$'function SpawnPoints()\n\treturn {\n\t\tunemployed = {\n\t\t\t{ worldX = 40, worldY = 22, posX = 67, posY = 201 }\n\t\t}\n\t}\nend'
+  # The image downloads the item of WORKSHOP_IDS before the game starts, so this start has its map,
+  # after the maps of INI_Map, and its spawn region in the file the game would write.
+  export FAKE_GAME_VERSION=42.21.0 ADMINPASSWORD=secret WORKSHOP_IDS=500 INI_Mods='\RiverMap' INI_Map='Admin Map;Muldraugh, KY'
+  configure_server > "${WORK}/out" 2> "${WORK}/err"
+  expect_line "${WORK}/out" 'Game: version 42.21.0'
+  expect_eq "$(cat "${HOMEDIR}/steamcmd-calls")" "+force_install_dir ${STEAMAPPDIR} +login anonymous +workshop_download_item 108600 500 +quit"
+  expect_line "${WORK}/out" 'Workshop: downloaded 1 new item with SteamCMD'
+  [ -s "${WORK}/err" ] && fail "warned on the first start: $(cat "${WORK}/err")"
+  expect_line "${ini}" 'Map=Admin Map;River Map;Muldraugh, KY'
+  expect_eq "$(cat "${spawn}")" "$(head -n 2 <<< "${regions}"; printf '%s\n' "${river}"; tail -n +3 <<< "${regions}")"
+  expect_eq "$(cat "${points}")" "${spawn_points}"
+  # The spawn regions an admin adds stay.
+  sed -i "s/^--\(\t\t{ name = \"Twiggy\)/\1/" "${spawn}"
+  expect_line "${spawn}" "${twiggy}"
+  cp "${spawn}" "${WORK}/spawn.before"
+  rm "${HOMEDIR}/steamcmd-calls"
+  configure_server > /dev/null 2>&1
+  [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "SteamCMD downloaded an item that is on disk"
+  cmp -s "${spawn}" "${WORK}/spawn.before" || fail "the spawn regions changed on the second start: $(diff "${WORK}/spawn.before" "${spawn}")"
+
+  # Without the game version the file is the game's own, and the spawn points an admin set stay.
+  unset FAKE_GAME_VERSION
+  rm "${spawn}"
+  printf 'function SpawnPoints() return {} end\n' > "${points}"
+  configure_server > "${WORK}/out" 2> "${WORK}/err"
+  expect_eq "$(cat "${WORK}/err")" "Warning: could not read the game version from the game files: zombie/core/Core.class has no int constant buildVersion
+         So this start leaves the maps and spawn regions of mods as they are, only checks that the mods in Mods= are on disk, doesn't check Map=, and can't count the folders the game's file watcher watches."
+  grep -q '^Game: version' "${WORK}/out" && fail "named a game version it could not read"
+  expect_eq "$(cat "${spawn}")" "${regions}"
+  expect_eq "$(cat "${points}")" 'function SpawnPoints() return {} end'
+}
+
+test_workshop_download() {
+  TEST='workshop download'
+  new_env
+  # The retries would otherwise wait 10 seconds each.
+  sleep() { :; }
+  local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600" calls="${HOMEDIR}/steamcmd-calls"
+  local start="+force_install_dir ${STEAMAPPDIR} +login anonymous" items
+  download() { download_workshop_items "${ini}" "${content}" > "${WORK}/out" 2> "${WORK}/err"; }
+  # Items on disk are the game's to update, and nothing else starts SteamCMD.
+  mkdir -p "${content}/101"
+  for items in '' '101' ' 101 ;;abc'; do
+    set_ini_value "${ini}" WorkshopItems "${items}"
+    download
+    [ -f "${calls}" ] && fail "SteamCMD started for WorkshopItems=${items}"
+    [ -s "${WORK}/out" ] || [ -s "${WORK}/err" ] && fail "said something for WorkshopItems=${items}: $(cat "${WORK}/out" "${WORK}/err")"
+  done
+
+  # Each missing item once; the game skips entries that are no workshop ID.
+  set_ini_value "${ini}" WorkshopItems ' 102;101;;103;102;+quit'
+  download
+  expect_eq "$(cat "${calls}")" "${start} +workshop_download_item 108600 102 +workshop_download_item 108600 103 +quit"
+  [ -d "${content}/102/mods" ] && [ -d "${content}/103/mods" ] || fail "the items are not where the server looks for them"
+  expect_eq "$(head -n 1 "${WORK}/out")" 'Workshop: downloading 2 new items with SteamCMD'
+  expect_eq "$(tail -n 1 "${WORK}/out")" 'Workshop: downloaded 2 new items with SteamCMD'
+  [ -s "${WORK}/err" ] && fail "warned about items that downloaded: $(cat "${WORK}/err")"
+
+  # An item that fails is tried three times, then left to the server with a warning.
+  rm "${calls}"
+  set_ini_value "${ini}" WorkshopItems '104;105;106'
+  FAKE_WORKSHOP_FAIL='104 106' download
+  expect_eq "$(cat "${calls}")" "${start} +workshop_download_item 108600 104 +workshop_download_item 108600 105 +workshop_download_item 108600 106 +quit
+${start} +workshop_download_item 108600 104 +workshop_download_item 108600 106 +quit
+${start} +workshop_download_item 108600 104 +workshop_download_item 108600 106 +quit"
+  expect_line "${WORK}/out" 'Workshop: downloaded 1 new item with SteamCMD'
+  expect_eq "$(cat "${WORK}/err")" 'Warning: SteamCMD could not download these workshop items (its output is above), so the server downloads them while it starts and their maps are added on the start after: 104 106'
+  # Without its success line an item didn't download, whatever SteamCMD's exit code.
+  rm "${calls}"
+  FAKE_STEAM_SILENT=1 download
+  expect_eq "$(wc -l < "${calls}")" 3
+  grep -q '^Workshop: downloaded' "${WORK}/out" && fail "counted items without SteamCMD's success line"
+  grep -q ': 104 106$' "${WORK}/err" || fail "the items SteamCMD did not download were not named"
+  # The success line of item 104 is none for item 10, although its failed download left a folder, and
+  # an item SteamCMD puts elsewhere is not where the server looks for it.
+  rm "${calls}"
+  set_ini_value "${ini}" WorkshopItems '10;104;107'
+  FAKE_WORKSHOP_FAIL=10 FAKE_WORKSHOP_PARTIAL=1 FAKE_WORKSHOP_ELSEWHERE=107 download
+  expect_line "${WORK}/out" 'Workshop: downloaded 1 new item with SteamCMD'
+  expect_eq "$(cat "${WORK}/err")" 'Warning: SteamCMD could not download these workshop items (its output is above), so the server downloads them while it starts and their maps are added on the start after: 10 107'
+
+  # Without Steam the server doesn't use workshop items.
+  rm "${calls}"
+  NOSTEAM=true download
+  [ -f "${calls}" ] && fail "SteamCMD downloaded items for a server without Steam"
+}
+
+# The reader against a fake game built here: zombie/core/Core and GameVersion as compiled classes in the
+# game's jar (Build 42) or loose under java/ (Build 41).
+test_game_version() {
+  TEST='game version'
+  new_env
+  # javac and jar would announce it on stderr.
+  unset JAVA_TOOL_OPTIONS
+  local out="${WORK}/version"
+  if ! command -v javac > /dev/null || ! command -v jar > /dev/null; then
+    fail "the test needs a JDK"
+    return
+  fi
+  mkdir -p "${out}/reader"
+  javac --release 17 -d "${out}/reader" "${REPO}/version/ReadGameVersion.java" \
+    && jar --create --file "${out}/reader.jar" --main-class ReadGameVersion -C "${out}/reader" . || { fail "the reader did not compile"; return; }
+  VERSION_READER="${out}/reader.jar"
+  ln -sf "$(command -v java)" "${STEAMAPPDIR}/jre64/bin/java"
+  version() {
+    # The JVM announces the options in these on stderr, which game_version leaves out.
+    (cd / && export JAVA_TOOL_OPTIONS=-Dx=y JDK_JAVA_OPTIONS=-Dx=y _JAVA_OPTIONS=-Dx=y && game_version)
+  }
+  core() {
+    # $1 = classes dir, $2 = the body of Core
+    rm -rf "${out}/src" "$1"
+    mkdir -p "${out}/src"
+    printf '%s\n' 'package zombie.core;' 'public final class GameVersion {' '  public GameVersion(int major, int minor, String suffix) {}' '}' > "${out}/src/GameVersion.java"
+    printf '%s\n' 'package zombie.core;' 'public final class Core {' "$2" '}' > "${out}/src/Core.java"
+    javac --release 17 -d "$1" "${out}/src/GameVersion.java" "${out}/src/Core.java"
+  }
+  # The loose classes come after a jar that isn't one and before a jar with another Core, like a
+  # stale one of Build 42.
+  core "${out}/classes" 'private static final GameVersion gameVersion = new GameVersion(1, 2, ""); private static final int buildVersion = 3;' \
+    && jar --create --file "${out}/stale.jar" -C "${out}/classes" . || { fail "the stale Core did not compile"; return; }
+  game() {
+    # $1 = jar or loose, $2 = the body of Core. Prints what game_version prints.
+    rm -rf "${STEAMAPPDIR}/java"
+    mkdir -p "${STEAMAPPDIR}/java"
+    core "${out}/classes" "$2" || { echo "compile error"; return; }
+    if [ "$1" = jar ]; then
+      jar --create --file "${STEAMAPPDIR}/java/projectzomboid.jar" -C "${out}/classes" .
+      printf '%s\n' '{"classpath": ["java/.", "java/projectzomboid.jar"]}' > "${STEAMAPPDIR}/ProjectZomboid64.json"
+    else
+      cp -r "${out}/classes/zombie" "${STEAMAPPDIR}/java/"
+      jar --create --file "${STEAMAPPDIR}/java/trove.jar" -C "${out}/src" GameVersion.java
+      printf 'garbage' > "${STEAMAPPDIR}/java/broken.jar"
+      cp "${out}/stale.jar" "${STEAMAPPDIR}/java/projectzomboid.jar"
+      printf '%s\n' '{"classpath": ["java/missing.jar", "java/broken.jar", "java/trove.jar", "java/.", "java/projectzomboid.jar"]}' > "${STEAMAPPDIR}/ProjectZomboid64.json"
+    fi
+    version
+  }
+  # The game's own: its static initializer runs code and makes other objects first, and would stop a
+  # JVM that ran it. It has long and double constants, which take two constant pool entries, and
+  # switches, which pad to a multiple of 4 from where they start; these start at each of the four.
+  local t='switch (mode) { case 1: x = 1; break; case 2: x = 2; break; case 3: x = 3; break; default: }'
+  local l='switch (mode) { case 1: x = 1; break; case 1000: x = 2; break; default: }' p='x = 50;'
+  expect_eq "$(game jar "
+    private static final int mode = Integer.getInteger(\"mode\", 2);
+    private static double scale = 0.01;
+    private static long ticks = 5_000_000_000L;
+    private static int x;
+    private static final String name;
+    static {
+      switch (mode) { case 1: name = \"a\"; break; case 2: name = \"b\"; break; default: name = \"c\"; }
+      switch (mode) { case 1: name.length(); break; case 1000: name.trim(); break; default: }
+      $t $p $t $p $p $t $p $p $p $t $l $l $p $l $p $p $l $p $p $p $l
+    }
+    private static final GameVersion breakMods = new GameVersion(42, 0, \"\");
+    private static final GameVersion gameVersion = new GameVersion(42, 20, \"\");
+    private static final int buildVersion = 2;
+    static { Runtime.getRuntime().halt(3); }
+    public String getVersion() { return gameVersion + \".\" + buildVersion + \" \" + name + breakMods + scale + ticks; }")" 42.20.2
+  expect_eq "$(game loose '
+    private static final GameVersion gameVersion = new GameVersion(41, 78, "");
+    private static final int buildVersion = 16;')" 41.78.16
+  # Numbers of every size, and suffixes from one instruction that takes nothing from the stack
+  expect_eq "$(game jar '
+    private static final int buildVersion = 70000;
+    private static final GameVersion gameVersion = new GameVersion(100000, 1000, null);')" 100000.1000.70000
+  expect_eq "$(game loose '
+    private static final GameVersion gameVersion;
+    static { String suffix = "a"; gameVersion = new GameVersion(5, -1, suffix); }
+    private static final int buildVersion = 0;')" 5.-1.0
+  expect_eq "$(game jar '
+    private static String suffix = "";
+    private static final GameVersion gameVersion = new GameVersion(-100, -300, suffix);
+    private static final int buildVersion = 1;')" -100.-300.1
+  expect_eq "$(game jar '
+    private static final GameVersion gameVersion = new GameVersion(42, 22, suffix());
+    private static final int buildVersion = 1;
+    static String suffix() { return ""; }')" 42.22.1
+  # What it can't read fails with the reason. With more instructions for the suffix, those before the
+  # last two aren't major and minor.
+  local no_call='the static initializer of zombie/core/Core.class sets gameVersion to no new GameVersion(<major>, <minor>, <suffix>)'
+  (game jar 'private static final GameVersion gameVersion = make(); private static final int buildVersion = 2; static GameVersion make() { return new GameVersion(42, 20, ""); }' > "${WORK}/out") \
+    && fail "read a version that the static initializer doesn't set"
+  expect_eq "$(cat "${WORK}/out")" "${no_call}"
+  (game jar 'private static final GameVersion gameVersion = new GameVersion(42, 24, String.valueOf(7)); private static final int buildVersion = 2;' > "${WORK}/out") \
+    && fail "read a version with a suffix from more than one instruction: $(cat "${WORK}/out")"
+  expect_eq "$(cat "${WORK}/out")" "${no_call}"
+  (game jar 'private static final GameVersion gameVersion = new GameVersion(42, 20, ""); private static int buildVersion = 2;' > "${WORK}/out") \
+    && fail "read a build number that is no constant"
+  expect_eq "$(cat "${WORK}/out")" 'zombie/core/Core.class has no int constant buildVersion'
+  rm "${STEAMAPPDIR}/java/projectzomboid.jar"
+  (version > "${WORK}/out") && fail "read a version without Core.class"
+  expect_eq "$(cat "${WORK}/out")" 'no entry of the game'"'"'s classpath (java/. java/projectzomboid.jar) holds zombie/core/Core.class'
+  rm "${STEAMAPPDIR}/ProjectZomboid64.json"
+  (game_version > "${WORK}/out") && fail "read a version without ProjectZomboid64.json"
+  expect_eq "$(cat "${WORK}/out")" "${STEAMAPPDIR}/ProjectZomboid64.json is missing or lists no classpath"
 }
 
 test_list_env() {
@@ -1249,7 +1506,7 @@ test_vars_documented() {
   done < "${SCRIPT_DIR}/vars.tsv"
   for name in $(grep -rhoE '\$\{[A-Z][A-Z0-9_]+(:-|\+x|\})' "${SCRIPT_DIR}" | grep -oE '[A-Z][A-Z0-9_]+' | sort -u); do
     case "${name}" in
-      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|VANILLA_MAP|KEY|VALUE|NAME|LOG_*) continue ;;
+      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
     esac
     grep -q "^${name}	" "${SCRIPT_DIR}/vars.tsv" || fail "${name} is read but not in vars.tsv"
   done
@@ -1295,41 +1552,200 @@ test_game() {
   grep -q 'GAME_UPDATE=false starts the installed game' "${WORK}/err" || fail "the GAME_UPDATE hint was missing"
 }
 
+test_update_check() {
+  TEST='update check'
+  new_env
+  local value console
+  expect_eq "$(MOD_UPDATE_CHECK=30s mod_update_interval)" 30
+  expect_eq "$(MOD_UPDATE_CHECK=15m mod_update_interval)" 900
+  expect_eq "$(MOD_UPDATE_CHECK=2H mod_update_interval)" 7200
+  expect_eq "$(MOD_UPDATE_CHECK=08m mod_update_interval)" 480
+  expect_eq "$(MOD_UPDATE_CHECK='' mod_update_interval)" ""
+  for value in 15 0m 00m 1d 1.5m ' 5m'; do
+    (MOD_UPDATE_CHECK="${value}" mod_update_interval > /dev/null 2>&1) && fail "MOD_UPDATE_CHECK='${value}' was taken as a duration"
+  done
+  # Players are warned 5 minutes, 1 minute and 10 seconds before the restart, or from the interval on
+  # when that is shorter.
+  expect_eq "$(restart_warnings 300 | paste -sd ' ')" "300 60 10"
+  expect_eq "$(restart_warnings 60 | paste -sd ' ')" "60 10"
+  expect_eq "$(restart_warnings 10 | paste -sd ' ')" "10"
+  expect_eq "$(in_words 300)" "5 minutes"
+  expect_eq "$(in_words 60)" "1 minute"
+  expect_eq "$(in_words 90)" "90 seconds"
+  expect_eq "$(in_words 1)" "1 second"
+  # Appending, so that emptying the file starts it over.
+  : > "${WORK}/console"
+  exec {console}>> "${WORK}/console"
+  # Only the answer itself counts, not the console commands the server echoes, and the player count
+  # after it. A command with the started line in it doesn't start the checks over during the warnings.
+  printf '%s\n' 'LOG  : Network      f:0> *** SERVER STARTED ***' \
+    'command entered via server console (System.in): "servermsg CheckModsNeedUpdate: Mods need update"' \
+    'LOG  : General      f:0> Players connected (0): ' 'LOG  : Mod          f:0> CheckModsNeedUpdate: Mods need update' \
+    'command entered via server console (System.in): "servermsg Players connected (0): "' \
+    'LOG  : General      f:0> Players connected (3): ' \
+    'command entered via server console (System.in): "servermsg *** SERVER STARTED ***"' \
+    'LOG  : Mod          f:0> CheckModsNeedUpdate: Mods need update' 'LOG  : General      f:0> Players connected (3): ' \
+    | follow_output "${WORK}/ready" "${console}" 900 > "${WORK}/out"
+  expect_line "${WORK}/out" 'Workshop: items have updates, so the server restarts in 5 minutes to download them, after warning the 3 players online'
+  expect_eq "$(cat "${WORK}/console")" $'players\nservermsg "The server restarts in 5 minutes to update mods."'
+  [ -f "${WORK}/ready" ] || fail "the server was not marked ready"
+  # Without checks of its own the image leaves the server's answers alone.
+  : > "${WORK}/console"
+  printf '%s\n' 'LOG  : Network      f:0> *** SERVER STARTED ***' 'LOG  : Mod          f:0> CheckModsNeedUpdate: Mods need update' \
+    | follow_output "${WORK}/ready" "${console}" "" > /dev/null
+  [ -s "${WORK}/console" ] && fail "acted on an answer without MOD_UPDATE_CHECK: $(cat "${WORK}/console")"
+  # A check that falls due within a line leaves the line whole.
+  : > "${WORK}/console"
+  { echo 'LOG  : Network      f:0> *** SERVER STARTED ***'; printf 'half'; sleep 1.5; echo ' line'; } \
+    | follow_output "${WORK}/ready" "${console}" 1 > "${WORK}/out"
+  expect_eq "$(tail -n 1 "${WORK}/out")" "half line"
+  expect_eq "$(sort -u "${WORK}/console")" checkModsNeedUpdate
+  # A last line without a newline is kept.
+  printf 'last' | follow_output "${WORK}/ready" "${console}" "" > "${WORK}/out"
+  expect_eq "$(cat "${WORK}/out")" last
+  # Without a player count the check is due again after the interval.
+  : > "${WORK}/console"
+  { printf '%s\n' 'LOG  : Network      f:0> *** SERVER STARTED ***' 'LOG  : Mod          f:0> CheckModsNeedUpdate: Mods need update'; sleep 1.5; } \
+    | follow_output "${WORK}/ready" "${console}" 1 > /dev/null
+  expect_eq "$(grep -A 1 -x players "${WORK}/console" | tail -n 1)" checkModsNeedUpdate
+  # Each later warning comes that long before the restart, so with 63 seconds to it, "1 minute" comes 3
+  # seconds after the first.
+  : > "${WORK}/console"
+  { printf '%s\n' 'LOG  : Network      f:0> *** SERVER STARTED ***' 'LOG  : Mod          f:0> CheckModsNeedUpdate: Mods need update' \
+      'LOG  : General      f:0> Players connected (1): '; sleep 4; } \
+    | follow_output "${WORK}/ready" "${console}" 63 > /dev/null &
+  sleep 1.5
+  expect_eq "$(grep -c servermsg "${WORK}/console")" 1
+  wait "$!"
+  expect_eq "$(cat "${WORK}/console")" $'players\nservermsg "The server restarts in 63 seconds to update mods."\nservermsg "The server restarts in 1 minute to update mods."'
+  exec {console}>&-
+}
+
 test_entry() {
   TEST=entry
   new_env
+  # Answers checkModsNeedUpdate with FAKE_MODS and players with FAKE_PLAYERS, after the log prefixes of
+  # Build 42 and Build 41, which has two "> ".
   cat > "${STEAMAPPDIR}/start-server.sh" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$@" > "${HOMEDIR}/args"
 printf '%s\n' "${LD_PRELOAD:-}" > "${HOMEDIR}/preload"
 echo "LOG  : Network      f:0> *** SERVER STARTED ****"
 while IFS= read -r line; do
-  [ "${line}" = quit ] && { echo "saving"; sleep 0.2; echo "saved"; exit 0; }
   echo "command: ${line}"
+  case "${line}" in
+    quit) echo "saving"; sleep 0.2; echo "saved"; exit 0 ;;
+    checkModsNeedUpdate)
+      echo "LOG  : Mod          f:0> CheckModsNeedUpdate: Checking..."
+      echo "LOG  : General      f:0> Checking started. The answer will be written in the log file and in the chat"
+      echo "LOG  : Mod          f:0> CheckModsNeedUpdate: ${FAKE_MODS:-Mods updated}" ;;
+    players)
+      printf 'LOG  : General     , 1700000000000> 1,234> Players connected (%s): \n' "${FAKE_PLAYERS:-0}"
+      for ((i = 1; i <= ${FAKE_PLAYERS:-0}; i++)); do echo "-player${i}"; done
+      echo ;;
+  esac
 done
 EOF
   chmod +x "${STEAMAPPDIR}/start-server.sh"
-  (cd "${WORK}" && GAME_FILE_WATCHER=false exec bash "${SCRIPT_DIR}/entry.sh") > "${WORK}/entry.log" 2>&1 &
-  local pid=$! healthy=false
-  for _ in $(seq 1 50); do
-    bash "${SCRIPT_DIR}/healthcheck.sh" && { healthy=true; break; }
-    sleep 0.1
-  done
-  [ "${healthy}" = true ] || { fail "the health check never passed"; cat "${WORK}/entry.log" >&2; }
+  local log="${WORK}/entry.log" pid status
+  start_entry() {
+    # $@ = variables for this start. A ready file left by a run that was killed would pass the health
+    # check at once.
+    rm -f /tmp/pz-ready
+    (cd "${WORK}" && exec env GAME_FILE_WATCHER=false "$@" bash "${SCRIPT_DIR}/entry.sh") > "${log}" 2>&1 &
+    pid=$!
+    for _ in $(seq 1 50); do
+      bash "${SCRIPT_DIR}/healthcheck.sh" && return 0
+      sleep 0.1
+    done
+    fail "the health check never passed"
+    cat "${log}" >&2
+  }
+  wait_entry() {
+    # Waits up to 5 seconds for entry.sh to exit by itself and sets status to its exit code.
+    for _ in $(seq 1 50); do
+      kill -0 "${pid}" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "${pid}" 2>/dev/null && { fail "the container did not exit"; kill -TERM "${pid}"; }
+    wait "${pid}"
+    status=$?
+  }
+  commands() { sed -n 's/^command: //p' "${log}"; }
+
+  start_entry
   bash "${SCRIPT_DIR}/console.sh" servermsg "hello there" > /dev/null || fail "console failed"
-  sleep 0.2
-  grep -qxF 'command: servermsg "hello there"' "${WORK}/entry.log" || fail "console command did not reach the server"
+  # Longer than the shortest interval, to see that there are no checks without MOD_UPDATE_CHECK.
+  sleep 1.5
+  grep -qxF 'command: servermsg "hello there"' "${log}" || fail "console command did not reach the server"
   kill -TERM "${pid}"
   wait "${pid}"
   expect_eq "$?" 0
-  grep -q saving "${WORK}/entry.log" || fail "the server did not receive quit"
-  grep -q saved "${WORK}/entry.log" || fail "the last server output was lost"
+  grep -q saving "${log}" || fail "the server did not receive quit"
+  grep -q saved "${log}" || fail "the last server output was lost"
   bash "${SCRIPT_DIR}/healthcheck.sh" && fail "the health check passed after the server stopped"
   expect_line "${HOMEDIR}/args" "-servername"
   expect_line "${HOMEDIR}/preload" /usr/local/lib/no_file_watcher.so
+  expect_eq "$(commands)" $'servermsg "hello there"\nquit'
+
+  # Items without updates: the checks go on, a player count without updates changes nothing, and
+  # docker stop between the checks saves as before.
+  start_entry MOD_UPDATE_CHECK=1s
+  for _ in $(seq 1 40); do
+    [ "$(commands | grep -c '^checkModsNeedUpdate$')" -ge 2 ] && break
+    sleep 0.1
+  done
+  [ "$(commands | grep -c '^checkModsNeedUpdate$')" -ge 2 ] || fail "the checks stopped after Mods updated"
+  bash "${SCRIPT_DIR}/console.sh" players > /dev/null
+  sleep 0.3
+  expect_eq "$(commands | sort -u)" $'checkModsNeedUpdate\nplayers'
+  kill -TERM "${pid}"
+  wait "${pid}"
+  expect_eq "$?" 0
+  grep -q saved "${log}" || fail "docker stop between update checks did not save"
+  expect_eq "$(commands | tail -n 1)" quit
+
+  # Items with updates and players online: a warning for the interval, as it is shorter than 5
+  # minutes, then quit, and no more checks meanwhile. The container exits 0 for its restart policy.
+  start_entry MOD_UPDATE_CHECK=1s FAKE_MODS="Mods need update" FAKE_PLAYERS=2
+  wait_entry
+  expect_eq "${status}" 0
+  expect_eq "$(commands)" $'checkModsNeedUpdate\nplayers\nservermsg "The server restarts in 1 second to update mods."\nquit'
+  expect_line "${log}" 'Workshop: items have updates, so the server restarts in 1 second to download them, after warning the 2 players online'
+  grep -q saved "${log}" || fail "the restart for updates did not save"
+  grep -q 'Shutdown signal' "${log}" && fail "the restart for updates went through the stop signal"
+
+  # Nobody online: quit at once.
+  start_entry MOD_UPDATE_CHECK=1s FAKE_MODS="Mods need update"
+  wait_entry
+  expect_eq "${status}" 0
+  expect_eq "$(commands)" $'checkModsNeedUpdate\nplayers\nquit'
+  expect_line "${log}" 'Workshop: items have updates, so the server restarts now to download them, as no player is online'
+  grep -q saved "${log}" || fail "the restart for updates did not save"
+
+  # docker stop during the warning still saves.
+  start_entry MOD_UPDATE_CHECK=3s FAKE_MODS="Mods need update" FAKE_PLAYERS=1
+  for _ in $(seq 1 60); do
+    grep -q '^command: servermsg' "${log}" && break
+    sleep 0.1
+  done
+  expect_line "${log}" 'Workshop: items have updates, so the server restarts in 3 seconds to download them, after warning the 1 player online'
+  kill -TERM "${pid}"
+  wait "${pid}"
+  expect_eq "$?" 0
+  expect_eq "$(commands)" $'checkModsNeedUpdate\nplayers\nservermsg "The server restarts in 3 seconds to update mods."\nquit'
+  grep -q 'Shutdown signal' "${log}" || fail "docker stop during the warning did not send quit"
+  grep -q saved "${log}" || fail "docker stop during the warning did not save"
+
+  # A value that is no duration stops the start before the game is updated.
+  rm -f "${HOMEDIR}/steamcmd-calls"
+  (cd "${WORK}" && MOD_UPDATE_CHECK=15 exec timeout 10 bash "${SCRIPT_DIR}/entry.sh") > "${log}" 2>&1
+  expect_eq "$?" 1
+  expect_eq "$(cat "${log}")" "Error: MOD_UPDATE_CHECK=15 is not a duration such as 30s, 15m or 1h. Leave it empty to turn the check off."
+  [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "the game was updated with an invalid MOD_UPDATE_CHECK"
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_vars_documented test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

@@ -1,9 +1,13 @@
 #!/bin/bash
-# Boots an image on a game branch and checks that it installs the game, starts the
+# Boots an image on a game branch and checks that it installs the game, reads its version, starts the
 # server, keeps settings written before its first start, creates its database and saves on
 # `docker stop`, then starts it again to check the update and the settings against the files the
-# server wrote. On Build 42 a start with a test mod checks how the game's map zone loader takes a zone
-# without x and y. Then, with the host's inotify watch limit below what the game watches with a mod, it
+# server wrote. A first start on a new data volume with a map mod from the workshop checks that the
+# image downloads it before the server starts, so that start has its map and spawn region; on Build 42
+# a local mod in that start checks how the game's map zone loader takes a zone without x and y. The
+# start after adds an item, which SteamCMD downloads next to one the server downloaded itself, and
+# asks the server whether its items have updates and how many players are online. Then,
+# with the host's inotify watch limit below what the game watches with a mod, it
 # checks that the image turns the game's file watcher off, and whether the game still needs that. That
 # limit holds for every user of the host for a few minutes, a desktop's programs included. Writes the
 # env reference for the docs site to <out dir>/<branch>-<build id>.json, with the image version from
@@ -76,10 +80,13 @@ game_lines="$(docker logs "${name}" 2>&1 | grep 'Game: ' || true)"
 build="$(sed -n "s/^Game: ${branch} branch, build \([0-9][0-9]*\)$/\1/p" <<< "${game_lines}" | tail -n 1)"
 [ -n "${build}" ] || fail "the log does not say which build of the ${branch} branch was installed. Its lines with 'Game: ' are:
 ${game_lines:-none}"
-# The server logs its version at startup; java.version and the like are not it.
-version="$(docker logs "${name}" 2>&1 | grep -oE '(versionNumber=|[[:space:]>]version=|ZNet: Startup version )[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | sed 's/.*[= ]//' || true)"
-# list-mods reads it from Zomboid/server-console.txt the same way.
-[ -n "${version}" ] || fail "the log does not show the game version, so list-mods can't find it either"
+# The server logs its version at startup (version=<version> <revision> demo=false); java.version and
+# the like are not it. The image reads it from the game files before.
+version="$(docker logs "${name}" 2>&1 | grep -oE '[[:space:]>]version=[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | sed 's/.*=//' || true)"
+[ -n "${version}" ] || fail "the log does not show the game version"
+read_version="$(docker logs "${name}" 2>/dev/null | sed -n 's/^Game: version //p' | head -n 1 || true)"
+[ "${read_version}" = "${version}" ] \
+  || fail "the image read the game version ${read_version:-(none)} from the game files, but the server logs ${version}"
 case "${branch}" in
   public) channel=stable ;;
   unstable) channel=beta ;;
@@ -131,7 +138,7 @@ docker exec "${name}" grep -qx 'PublicName=Boot test' "${home}/Server/pzserver.i
   || fail "PublicName did not survive a restart"
 docker exec "${name}" grep -qE '^[[:space:]]*Transmission = 4,' "${home}/Server/pzserver_SandboxVars.lua" \
   || fail "SANDBOX_ZombieLore__Transmission was not applied on the second start"
-# From the second start the game version is known, so the maps in Map= are checked, the game's own too.
+# The maps in Map= are checked, the game's own too.
 logs="$(docker logs "${name}" 2>&1)"
 grep -qx 'Config: Map is Muldraugh, KY' <<< "${logs}" || fail "the second start did not name the maps in Map="
 grep -q 'stops loading map zones' <<< "${logs}" && fail "the zone check failed the game's own map"
@@ -140,31 +147,104 @@ docker exec "${name}" sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " "'
   && fail "-adminpassword was passed although the database exists"
 stop_server 2
 
+# A first start on a new data volume, with a small map mod from the workshop that has Build 41 and 42
+# versions of its map, each with a spawn point. A server downloads workshop items while it starts, too
+# late for the maps and spawn regions of their mods, so the image downloads new ones with SteamCMD
+# before. The server has to take that download as installed rather than download it again. It
+# downloads another item itself, which the image leaves to it because it has a folder, like the items of
+# a server that ran before the image downloaded any.
+map_item=2963883586
+map_mod=Louisville_Riverboat
+map=Louisville_Riverboat
+# Mod Options and Players On Map: a few KB each, and rarely updated
+server_item=2169435993
+new_item=2732804047
+workshop=/home/steam/pz-dedicated/steamapps/workshop
+content="${workshop}/content/108600"
+map_failed() {
+  # $1 = what went wrong
+  fail "$1. If workshop item ${map_item} no longer has a map ${map} with a spawnpoints.lua for ${label}, pick another small map item. Its spawnpoints.lua files: $(docker run --rm -v "${game_volume}:/home/steam/pz-dedicated" --entrypoint find "${image}" "${content}/${map_item}" -name spawnpoints.lua 2>&1 | paste -sd ' ')"
+}
+docker rm -f "${name}" >/dev/null
+docker volume rm -f "${home_volume}" >/dev/null
+# The game volume is kept, so the items of an earlier run would be on disk.
+docker run --rm -v "${game_volume}:/home/steam/pz-dedicated" --entrypoint bash "${image}" -c 'rm -rf "$1" && mkdir -p "$2"' \
+  _ "${workshop}" "${content}/${server_item}"
+mods="${map_mod}"
 # map_zone_warnings counts the zones the zone loader's Lua code fails on, not those it passes to Java
-# without x and y. This start finds out whether the game takes those: a mod's regions.lua for the vanilla map
-# has a polygon Region zone, which goes to Java without x and y, and after it a mannequin zone without
-# properties, which the game logs. Build 41 has another zone loader.
+# without x and y. This start also finds out whether the game takes those: a mod's regions.lua for the
+# vanilla map has a polygon Region zone, which goes to Java without x and y, and after it a mannequin
+# zone without properties, which the game logs. Build 41 has another zone loader.
 if [[ "${version}" != 41.* ]]; then
-  docker rm -f "${name}" >/dev/null
-  docker volume rm -f "${home_volume}" >/dev/null
   docker run --rm -v "${home_volume}:${home}" --entrypoint bash "${image}" -c \
     'mkdir -p "$1/media/maps/Muldraugh, KY" && printf "id=BootZones\n" > "$1/mod.info" \
       && printf "%s\n" "regions = {" "$2" "$3" "}" > "$1/media/maps/Muldraugh, KY/regions.lua"' \
     _ "${home}/mods/BootZones/common" \
     '{ name = "", type = "Region", z = 0, geometry = "polygon", points = { 10,10, 20,10, 20,20 } },' \
     '{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 1, height = 1 },'
-  docker run -d --name "${name}" --health-interval=5s \
-    -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
-    -e GAME_UPDATE=false -e ADMINPASSWORD=boot-test -e INI_Mods=BootZones "${image}" >/dev/null
-  wait_healthy || fail "the server with the BootZones mod exited before it started"
-  if grep -q 'Mannequin zone missing properties in media/maps/Muldraugh, KY/regions.lua' <<< "$(docker logs "${name}" 2>&1)"; then
+  mods="BootZones;${map_mod}"
+fi
+docker run -d --name "${name}" --health-interval=5s \
+  -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
+  -e GAME_UPDATE=false -e ADMINPASSWORD=boot-test -e WORKSHOP_IDS="${server_item};${map_item}" -e INI_Mods="${mods}" \
+  "${image}" >/dev/null
+wait_healthy || map_failed "the server with the workshop map ${map_mod} exited before it started"
+logs="$(docker logs "${name}" 2>&1)"
+grep -q "Workshop: item state .* -> DownloadPending ID=${server_item}\$" <<< "${logs}" \
+  || fail "the server did not download workshop item ${server_item} itself: $(grep "Workshop: .*${server_item}" <<< "${logs}")"
+grep -qx 'Workshop: downloaded 1 new item with SteamCMD' <<< "${logs}" \
+  || fail "the image did not download workshop item ${map_item} with SteamCMD before the server started"
+grep -qE "Workshop: ${map_item} installed to .*steamapps/workshop/content/108600/${map_item}/?\$" <<< "${logs}" \
+  || fail "the server did not use workshop item ${map_item} from where SteamCMD put it: $(grep "Workshop: .*${map_item}" <<< "${logs}")"
+grep -q "Workshop: item state .* -> DownloadPending ID=${map_item}\$" <<< "${logs}" \
+  && fail "the server downloaded workshop item ${map_item} again, so it doesn't take SteamCMD's download as installed: $(grep "Workshop: .*${map_item}" <<< "${logs}")"
+grep -qE "loading ${map_mod}\$" <<< "${logs}" || map_failed "the server did not load the mod ${map_mod}"
+if problems="$(grep -E "^Warning: Mods= .*${map_mod}|skipping non-existent map folder .*${map}" <<< "${logs}")"; then
+  map_failed "the map mod did not load as it should: ${problems}"
+fi
+docker exec "${name}" grep -qx "Map=${map};Muldraugh, KY" "${home}/Server/pzserver.ini" \
+  || map_failed "after the first start Map= is not ${map};Muldraugh, KY but $(docker exec "${name}" grep '^Map=' "${home}/Server/pzserver.ini")"
+docker exec "${name}" grep -qF "{ name = \"${map}\", file = \"media/maps/${map}/spawnpoints.lua\" }," "${home}/Server/pzserver_spawnregions.lua" \
+  || map_failed "after the first start pzserver_spawnregions.lua has no spawn region for ${map}"
+if [[ "${version}" != 41.* ]]; then
+  if grep -q 'Mannequin zone missing properties in media/maps/Muldraugh, KY/regions.lua' <<< "${logs}"; then
     echo "The game's map zone loader takes a zone that goes to Java without x and y"
   else
     echo "::warning title=Zone check::On ${label} a zone that goes to Java without x and y stops the game's map zone loading, so map_zone_warnings misses those zones and should count them too."
   fi
-  stop_server 1
-  docker rm -f "${name}" >/dev/null
 fi
+stop_server 1
+
+# SteamCMD writes its download of a new item next to those of the server and its own, and the server
+# has to take all of them as installed rather than download them again.
+docker rm -f "${name}" >/dev/null
+docker run -d --name "${name}" --health-interval=5s \
+  -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
+  -e GAME_UPDATE=false -e WORKSHOP_IDS="${server_item};${map_item};${new_item}" -e INI_Mods="${mods}" "${image}" >/dev/null
+wait_healthy || fail "the server exited before it started with workshop item ${new_item} added"
+logs="$(docker logs "${name}" 2>&1)"
+grep -qx 'Workshop: downloaded 1 new item with SteamCMD' <<< "${logs}" \
+  || fail "the image did not download the added workshop item ${new_item} with SteamCMD"
+for item in "${server_item}" "${map_item}" "${new_item}"; do
+  grep -qE "Workshop: ${item} installed to .*steamapps/workshop/content/108600/${item}/?\$" <<< "${logs}" \
+    && ! grep -q "Workshop: item state .* -> DownloadPending ID=${item}\$" <<< "${logs}" \
+    || fail "after SteamCMD downloaded workshop item ${new_item}, the server did not take ${item} as installed: $(grep -E "Workshop: .*${item}|timeUpdated" <<< "${logs}")"
+done
+# MOD_UPDATE_CHECK restarts the server on these answers, read after the game's log prefix.
+docker exec "${name}" console checkModsNeedUpdate >/dev/null
+docker exec "${name}" console players >/dev/null
+answer='> CheckModsNeedUpdate: (Mods need update|Mods updated|Check not completed)$'
+for _ in $(seq 1 30); do
+  logs="$(docker logs "${name}" 2>&1)"
+  grep -qE "${answer}" <<< "${logs}" && break
+  sleep 2
+done
+grep -qE "${answer}" <<< "${logs}" \
+  || fail "the server did not answer checkModsNeedUpdate as MOD_UPDATE_CHECK expects: $(grep CheckModsNeedUpdate <<< "${logs}")"
+grep -qE '> Players connected \(0\):' <<< "${logs}" \
+  || fail "the server did not answer players as MOD_UPDATE_CHECK expects: $(grep 'Players connected' <<< "${logs}")"
+stop_server 1
+docker rm -f "${name}" >/dev/null
 
 # The game stops when it runs out of inotify watches in its media folder or in a mod folder. With a
 # limit of one and a half times the folders of its media folder and a mod with twice as many, the

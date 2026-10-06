@@ -1,5 +1,8 @@
 #!/bin/bash
-# Installs the game into STEAMAPPDIR from the Steam branch in GAME_BRANCH and keeps it up to date.
+# Installs the game into STEAMAPPDIR from the Steam branch in GAME_BRANCH and keeps it up to date,
+# reads its version and downloads new workshop items before it starts.
+
+VERSION_READER=/usr/local/lib/read_game_version.jar
 
 game_build() {
   sed -n 's/^[[:space:]]*"buildid"[[:space:]]*"\([0-9]*\)".*/\1/p' \
@@ -51,7 +54,72 @@ update_game() {
   rm -f "${log}"
   echo "Error: SteamCMD could not install or update the ${branch} branch of the game; its output is above." >&2
   if [ -f "${STEAMAPPDIR}/start-server.sh" ] && [ "${installed}" = "${branch}" ]; then
-    echo "GAME_UPDATE=false starts the installed game without contacting Steam." >&2
+    echo "GAME_UPDATE=false starts the installed game without updating it." >&2
   fi
   exit 1
+}
+
+game_version() {
+  # Prints the version of the installed game as the server logs it (major.minor.build), read from its
+  # files with its own Java, or else why it can't, and fails.
+  local why status=0
+  local -a classpath=()
+  mapfile -t classpath < <(jq -r '.classpath[]' "${STEAMAPPDIR}/ProjectZomboid64.json" 2> /dev/null)
+  if [ "${#classpath[@]}" = 0 ]; then
+    echo "${STEAMAPPDIR}/ProjectZomboid64.json is missing or lists no classpath"
+    return 1
+  fi
+  # The version goes to stdout; what the JVM says on stderr only counts when it fails. The JVM would
+  # announce the options in these variables there. The classpath is relative to the game folder.
+  { why="$(cd "${STEAMAPPDIR}" && env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS \
+    "${STEAMAPPDIR}/jre64/bin/java" -jar "${VERSION_READER}" "${classpath[@]}" 2>&1 >&3)" || status=$?; } 3>&1
+  [ "${status}" = 0 ] || printf '%s\n' "${why}"
+  return "${status}"
+}
+
+# The server downloads the items in WorkshopItems while it starts, too late for the maps and spawn
+# regions of their mods, so the ones not on disk yet are downloaded before. The server takes them as
+# installed, and updates the items itself.
+download_workshop_items() {
+  # $1 = INI file, $2 = workshop content dir
+  local ini_file="$1" content_dir="$2" item log attempt count
+  local -a missing=() failed=() tried=() args=()
+  # Without Steam the server doesn't use workshop items.
+  is_true "${NOSTEAM:-}" && return 0
+  # The server skips entries that are no Steam ID.
+  while IFS= read -r item; do
+    [ -d "${content_dir}/${item}" ] || missing+=("${item}")
+  done < <(split_list "$(ini_value "${ini_file}" WorkshopItems)" | awk '/^[0-9]+$/ && !seen[$0]++')
+  [ "${#missing[@]}" -gt 0 ] || return 0
+
+  echo "Workshop: downloading ${#missing[@]} new item$([ "${#missing[@]}" = 1 ] || echo s) with SteamCMD"
+  log="$(mktemp)"
+  failed=("${missing[@]}")
+  for attempt in 1 2 3; do
+    args=()
+    for item in "${failed[@]}"; do
+      args+=(+workshop_download_item 108600 "${item}")
+    done
+    # In the background, so a stop signal doesn't wait for a download to finish.
+    (
+      "${STEAMCMDDIR}/steamcmd.sh" +force_install_dir "${STEAMAPPDIR}" +login anonymous "${args[@]}" +quit 2>&1 | tee "${log}"
+    ) &
+    wait "$!"
+    # SteamCMD doesn't end its output with a newline, so the next line would be appended to its last.
+    [ -z "$(tail -c 1 "${log}")" ] || echo
+    tried=("${failed[@]}")
+    failed=()
+    for item in "${tried[@]}"; do
+      grep -qF "Success. Downloaded item ${item} " "${log}" && [ -d "${content_dir}/${item}" ] || failed+=("${item}")
+    done
+    [ "${#failed[@]}" -gt 0 ] || break
+    [ "${attempt}" = 3 ] || sleep 10
+  done
+  rm -f "${log}"
+  count=$((${#missing[@]} - ${#failed[@]}))
+  [ "${count}" = 0 ] || echo "Workshop: downloaded ${count} new item$([ "${count}" = 1 ] || echo s) with SteamCMD"
+  if [ "${#failed[@]}" -gt 0 ]; then
+    echo "Warning: SteamCMD could not download these workshop items (its output is above), so the server downloads them while it starts and their maps are added on the start after: ${failed[*]}" >&2
+  fi
+  return 0
 }

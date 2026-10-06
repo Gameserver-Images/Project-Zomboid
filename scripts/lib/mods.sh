@@ -3,14 +3,6 @@
 
 VANILLA_MAP="Muldraugh, KY"
 
-console_game_version() {
-  # Prints the game version the server logged at its last start, nothing before the first start.
-  local console="${HOMEDIR}/Zomboid/server-console.txt"
-  [ -f "${console}" ] || return 0
-  grep -m 1 -oE '(versionNumber=|[[:space:]>]version=|ZNet: Startup version )[0-9]+\.[0-9]+(\.[0-9]+)?' "${console}" \
-    | head -n 1 | sed 's/.*[= ]//' || true
-}
-
 # Reads the mods in the given mods folders the way the game does (ChooseGameInfo, ZomboidFileSystem).
 # Build 41 reads mod.info in the mod folder itself. Build 42 picks the folder with the highest
 # version name (42, 42.12, ...) that isn't newer than the game, whether or not it holds a mod.info,
@@ -287,9 +279,9 @@ mod_dirs() {
 # items in WorkshopItems, in that order, then Zomboid/mods, which holds mods placed there by hand,
 # and the first of them with a mod ID has it. Prints the mod_info_rows it reads, each after a tag:
 # "load" for the mods the server loads, in load order, "" for the rest. Warns about entries that
-# don't load and why, and about load order hints and conflicts among the mods that load. Items
-# download while the server starts, so missing mods are only reported once every item in
-# WorkshopItems is there; without a game version that is all it checks.
+# don't load and why, and about load order hints and conflicts among the mods that load. The server
+# downloads the items SteamCMD couldn't while it starts, so missing mods are only reported once every
+# item in WorkshopItems is there; without a game version that is all it checks.
 load_mods() {
   # $1 = INI file, $2 = workshop content dir, $3 = game version ("" when unknown)
   local ini_file="$1" content_dir="$2" version="$3" item check_missing=1
@@ -586,6 +578,27 @@ merge_map_list() {
   (IFS=';'; printf '%s' "${merged[*]}")
 }
 
+write_spawn_regions() {
+  # $1 = spawnregions file. Writes what the game writes when there is none (ServerOptions), the same
+  # on Build 41 and 42, and the spawn points file its commented line names, unless that exists.
+  local region points
+  points="$(dirname "$1")/${SERVERNAME}_spawnpoints.lua"
+  {
+    printf 'function SpawnRegions()\n\treturn {\n'
+    for region in "${VANILLA_MAP}" "West Point, KY" "Rosewood, KY" "Riverside, KY"; do
+      printf '\t\t{ name = "%s", file = "media/maps/%s/spawnpoints.lua" },\n' "${region}" "${region}"
+    done
+    printf '\t\t-- Uncomment the line below to add a custom spawnpoint for this server.\n'
+    printf -- '--\t\t{ name = "Twiggy'"'"'s Bar", serverfile = "%s_spawnpoints.lua" },\n' "${SERVERNAME}"
+    printf '\t}\nend\n'
+  } > "$1"
+  [ -f "${points}" ] || {
+    printf 'function SpawnPoints()\n\treturn {\n\t\tunemployed = {\n'
+    printf '\t\t\t{ worldX = 40, worldY = 22, posX = 67, posY = 201 }\n'
+    printf '\t\t}\n\t}\nend\n'
+  } > "${points}"
+}
+
 add_spawn_region() {
   # $1 = spawnregions file, $2 = map name. Adds the map's spawn points when they are missing.
   local file="$1" name="$2"
@@ -612,13 +625,12 @@ remove_spawn_region() {
 # file, and removes the maps of the other mods on disk, which the server can't load. Until every
 # item in WorkshopItems is downloaded it only adds, since a mod may wait for an item it requires.
 apply_mod_maps() {
-  # $1 = INI file, $2 = spawnregions file, $3 = workshop content dir, $4 = what load_mods printed
-  local ini_file="$1" spawn_file="$2" content_dir="$3" rows="$4" version maps current merged state name dir item complete=1
+  # $1 = INI file, $2 = spawnregions file, $3 = workshop content dir, $4 = what load_mods printed,
+  # $5 = game version ("" when unknown)
+  local ini_file="$1" spawn_file="$2" content_dir="$3" rows="$4" version="$5" maps current merged state name dir item complete=1
   local -a unread=()
   local -A workshop_items=()
-  # The game version picks the version folders. It is known from the first start on, and nothing is
-  # downloaded before that.
-  version="$(console_game_version)"
+  # The game version picks the version folders.
   [ -n "${version}" ] || return 0
   while IFS= read -r item; do
     workshop_items["${item}"]=1
@@ -650,7 +662,6 @@ apply_mod_maps() {
   merged="$(merge_map_list "${current}" "$(IFS=';'; printf '%s' "${dropped[*]}")" "${added[@]}")"
   [ "${merged}" = "${current}" ] || set_ini_value "${ini_file}" Map "${merged}"
 
-  [ -f "${spawn_file}" ] || return 0
   while IFS=$'\t' read -r state name dir; do
     if [ -n "${enabled_map[${name}]+x}" ]; then
       [ -f "${dir}/spawnpoints.lua" ] && add_spawn_region "${spawn_file}" "${name}"

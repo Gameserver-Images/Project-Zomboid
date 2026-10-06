@@ -1,7 +1,7 @@
 #!/bin/bash
 # Prints one JSON document for the mods page of the docs site: the workshop items of WORKSHOP_IDS,
 # of the server's WorkshopItems and on disk, with their Steam details and the mods in them, and each
-# mod's requirements, maps and sandbox options for the game version of the server's last start.
+# mod's requirements, maps and sandbox options for the version of the installed game.
 # Usage: list-mods > mods.json
 
 set -euo pipefail
@@ -12,15 +12,16 @@ SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 . "${SCRIPT_DIR}/lib/config.sh"
 # shellcheck source=scripts/lib/mods.sh
 . "${SCRIPT_DIR}/lib/mods.sh"
+# shellcheck source=scripts/lib/game.sh
+. "${SCRIPT_DIR}/lib/game.sh"
 
 content_dir="${STEAMAPPDIR}/steamapps/workshop/content/108600"
 ini_file="${HOMEDIR}/Zomboid/Server/${SERVERNAME:-pzserver}.ini"
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
-version="$(console_game_version)"
-if [ -z "${version}" ]; then
-  echo "Error: ${HOMEDIR}/Zomboid/server-console.txt shows no game version. Start the server once first; it also downloads the workshop items while it starts." >&2
+if ! version="$(game_version)"; then
+  echo "Error: could not read the game version from the game files: ${version}" >&2
   exit 1
 fi
 

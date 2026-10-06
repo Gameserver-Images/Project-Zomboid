@@ -26,10 +26,9 @@ map_roots() {
 # matches map and file names case-sensitively, and takes a Map= without ";" as that one map, where the
 # game adds the maps named in the lots= lines of its map.info.
 check_maps() {
-  # $1 = INI file, $2 = what load_mods printed
-  local ini_file="$1" version maps map item mod root dir handler="" i j line
+  # $1 = INI file, $2 = what load_mods printed, $3 = game version ("" when unknown)
+  local ini_file="$1" version="$3" maps map item mod root dir handler="" i j line
   local -a roots=() items=() mods=() files=() sources=() table=() zone_files=(objects.lua regions.lua roomtones.lua)
-  version="$(console_game_version)"
   [ -n "${version}" ] || return 0
   maps="$(ini_value "${ini_file}" Map)"
   # The server loads the vanilla map for a blank Map=.

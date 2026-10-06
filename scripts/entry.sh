@@ -11,8 +11,8 @@ trap 'exit 143' TERM INT
 
 # shellcheck source=scripts/configure.sh
 . "${SCRIPT_DIR}/configure.sh"
-# shellcheck source=scripts/lib/game.sh
-. "${SCRIPT_DIR}/lib/game.sh"
+
+update_check="$(mod_update_interval)" || exit 1
 
 for dir in "${HOMEDIR}/Zomboid" "${STEAMAPPDIR}"; do
   blocked="$(find "${dir}" -type d ! -writable -print -quit 2>/dev/null)"
@@ -56,15 +56,11 @@ shutdown_server() {
 }
 
 # Output passes through this loop, which marks the server ready for the health check once it has
-# started. It's a child of this shell, so the last lines are waited for before the container exits.
+# started and runs the workshop update checks. It's a child of this shell, so the last lines are
+# waited for before the container exits.
 exec {LOG_FD}> >(
   trap '' TERM INT
-  while IFS= read -r line || [ -n "${line}" ]; do
-    printf '%s\n' "${line}"
-    if [[ "${line}" == *"*** SERVER STARTED ***"* ]]; then
-      : > "${SERVER_READY}"
-    fi
-  done
+  follow_output "${SERVER_READY}" "${CONSOLE_FD}" "${update_check}"
 )
 LOG_PID=$!
 ./start-server.sh "${ARGS[@]}" <"${SERVER_CONSOLE}" >&"${LOG_FD}" 2>&1 &

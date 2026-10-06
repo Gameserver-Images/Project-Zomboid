@@ -287,8 +287,8 @@
   ];
   // Shown below the problems and not counted: items to check again after the server's next start, and items that add nothing.
   const INFO_KINDS = [
-    ['pending', 'Mods from items not downloaded yet', "These items' descriptions name the mod IDs. The server downloads the items while it starts. Run list-mods again after that to check the mods."],
-    ['notDownloaded', 'Items not downloaded yet', 'The server downloads them while it starts. Run list-mods again after that to see their mods.'],
+    ['pending', 'Mods from items not downloaded yet', "These items' descriptions name the mod IDs. The container downloads the items on its next start. Run list-mods again after that to check the mods."],
+    ['notDownloaded', 'Items not downloaded yet', 'The container downloads them on its next start. Run list-mods again after that to see their mods.'],
     ['empty', 'Downloaded items without mods', 'The game finds no mod.info in them, so they add nothing.'],
   ];
   const $ = id => document.getElementById(id);
@@ -1233,7 +1233,7 @@
       : h('span', { class: 'item-title', text: itemTitle(item) });
     const badges = [];
     if (!item.available) badges.push(badge('bad', 'unavailable', 'Hidden, private or removed from the workshop'));
-    if (!item.downloaded && item.available) badges.push(badge('warn', 'not downloaded', 'The server downloads it while it starts'));
+    if (!item.downloaded && item.available) badges.push(badge('warn', 'not downloaded', 'The container downloads it on its next start'));
     const failing = item.mods.filter(inst => inst.loadProblem).length;
     if (failing) {
       badges.push(badge('warn', failing === item.mods.length ? `doesn't load on ${model.gameVersion}` : `${failing} of ${item.mods.length} mods don't load on ${model.gameVersion}`));
