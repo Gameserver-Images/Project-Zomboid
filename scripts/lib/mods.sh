@@ -564,9 +564,9 @@ merge_map_list() {
   for name in "${dropped[@]}"; do
     present["${name}"]=1
   done
-  IFS=';' read -ra entries <<< "${current}"
+  # The server trims the entries.
+  mapfile -t entries < <(split_list "${current}")
   for name in "${entries[@]}"; do
-    [ -n "${name}" ] || continue
     if [ "${name}" = "${VANILLA_MAP}" ]; then
       vanilla=true
       continue
@@ -580,7 +580,7 @@ merge_map_list() {
     present["${name}"]=1
     merged+=("${name}")
   done
-  if [ "${vanilla}" = true ] || [ -z "${current}" ]; then
+  if [ "${vanilla}" = true ] || [ -z "${current//[[:space:]]/}" ]; then
     merged+=("${VANILLA_MAP}")
   fi
   (IFS=';'; printf '%s' "${merged[*]}")
@@ -648,10 +648,7 @@ apply_mod_maps() {
 
   current="$(ini_value "${ini_file}" Map)"
   merged="$(merge_map_list "${current}" "$(IFS=';'; printf '%s' "${dropped[*]}")" "${added[@]}")"
-  if [ "${merged}" != "${current}" ]; then
-    set_ini_value "${ini_file}" Map "${merged}"
-    echo "Config: Map set to ${merged}"
-  fi
+  [ "${merged}" = "${current}" ] || set_ini_value "${ini_file}" Map "${merged}"
 
   [ -f "${spawn_file}" ] || return 0
   while IFS=$'\t' read -r state name dir; do

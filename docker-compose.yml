@@ -10,6 +10,12 @@ services:
         - EXTRA_LOCALES=${EXTRA_LOCALES:-}
     env_file:
       - .env
+    # A start logs about 5 MB, and Docker keeps everything by default.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     ports:
       - "16261:16261/udp"
       - "16262:16262/udp"

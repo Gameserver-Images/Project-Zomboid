@@ -258,6 +258,273 @@ test_maps() {
   expect_eq "$(merge_map_list "" "" "A")" "A;Muldraugh, KY"
   expect_eq "$(merge_map_list "B;Muldraugh, KY;B" "" "A")" "B;A;Muldraugh, KY"
   expect_eq "$(merge_map_list "B;C;Muldraugh, KY" "C;D" "A")" "B;A;Muldraugh, KY"
+  # The server trims the entries, and loads the vanilla map for a blank value.
+  expect_eq "$(merge_map_list " Muldraugh, KY; B ;B" "" "B" "A")" "B;A;Muldraugh, KY"
+  expect_eq "$(merge_map_list " " "" "A")" "A;Muldraugh, KY"
+}
+
+test_map_checks() {
+  TEST='map checks'
+  new_env
+  local ini="${SERVER}/pzserver.ini" content="${STEAMAPPDIR}/steamapps/workshop/content/108600" vanilla="${STEAMAPPDIR}/media/maps/Muldraugh, KY"
+  local handler="${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
+  check() { check_maps "${ini}" "$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> /dev/null)" > "${WORK}/out" 2> "${WORK}/err"; }
+  zones() {
+    # $1 = zone file, $2.. = its zones, one per line from line 2 on, in the table the game reads
+    local table=objects
+    [ "${1##*/}" = regions.lua ] && table=regions
+    mkdir -p "$(dirname "$1")"
+    printf '%s\n' "${table} = {" "${@:2}" '}' > "$1"
+  }
+  cells() {
+    # $1 = map folder, $2.. = its cells
+    local cell
+    mkdir -p "$1"
+    for cell in "${@:2}"; do touch "$1/${cell}.lotheader"; done
+  }
+  # The lines of the game's zone loader that fail on the zones
+  mkdir -p "$(dirname "${handler}")"
+  printf '%s\n' "print('ERROR: WaterZone missing properties in '..file..' at '..v.x..','..v.y..','..v.z)" \
+    'getWorld():registerWaterZone(v.x, v.y, v.x + v.width, v.y + v.height,' > "${handler}"
+  local poly='{ name = "", type = "WaterZone", z = 0, geometry = "polygon", points = { 10,10, 20,10, 20,20 } },'
+  local nav='{ name = "", type = "Nav", x = 1, y = 1, z = 0, width = 5, height = 1 },'
+  local hunter="${content}/100/mods/Hunter/42/media/maps/hunter's_base" green="${content}/200/mods/Green/common/media/maps/Greenport"
+  local split="${content}/200/mods/Green/42/media/maps/Greenport" raven="${content}/300/mods/Raven/42/media/maps/Raven Creek"
+  local king="${content}/400/mods/King/42/media/maps/Kingsmouth"
+  make_mod 100 Hunter HunterMod 42 "hunter's_base" "hunter's_base_small"
+  # A water zone without properties is skipped with an error when it has x, y and z. The game's error
+  # message fails on the polygon's missing x and y, which stops the zone loading.
+  zones "${hunter}/objects.lua" "${nav}" '{ name = "", type = "WaterZone", x = 1, y = 1, z = 0, width = 5, height = 1 },' "${poly} -- {lake}"
+  make_mod 200 Green GreenMod 42
+  # None of these stop it: zones without properties that have x, y and z, polygons the game hands to
+  # Java, a room tone in objects.lua (the game skips those), a complete water zone and comments. Strings
+  # may hold anything. The game does fail on the last zone, but it spans two lines, so it isn't read.
+  zones "${green}/objects.lua" \
+    '{ name = "a, {b} = c", type = "WaterZone", x = 1, y = 1, z = 0, width = 5, height = 1 },' \
+    "{ name = 'a \"b', type = 'WaterFlow', x = 1, y = 1, z = 0, width = 5, height = 1, properties = { WaterSpeed = 1 } };" \
+    '{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 5, height = 1 },' \
+    '{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 }, properties = { Outfit = "a" } },' \
+    '{ name = "", type = "WaterFlow", z = 0, geometry = "polygon", points = { 1,1, 2,2 }, properties = { WaterDirection = 90, WaterSpeed = 1 } },' \
+    '{ name = "", type = "Animal", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },' \
+    '{ name = "", type = "RoomTone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },' \
+    '{ name = "", type = "WaterZone", x = 1, y = 1, width = 5, height = 1, properties = { WaterGround = false, WaterShore = "true" } },' \
+    "-- ${poly}" '--[[' "${poly}" ']]' \
+    '{ name = "", type = "WaterZone", z = 0, properties = { WaterGround = "true" },' 'geometry = "polygon" },'
+  make_mod 300 Raven RavenMod 42 "Raven Creek"
+  make_mod 300 RavenExtra RavenExtraMod 42 "Raven Creek Extra"
+  make_mod 400 King KingMod 42 "Kingsmouth"
+  set_ini_value "${ini}" WorkshopItems '100;200;300;400'
+  set_ini_value "${ini}" Mods '\HunterMod;\GreenMod;\RavenMod;\RavenExtraMod;\KingMod'
+  set_ini_value "${ini}" Map "Greenport;Raven Creek;hunter's_base;Muldraugh, KY"
+
+  # Before the first start the game version and with it the files the game reads are unknown.
+  check
+  [ -s "${WORK}/out" ] || [ -s "${WORK}/err" ] && fail "checked the maps without a game version: $(cat "${WORK}/out" "${WORK}/err")"
+
+  echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  local found="Warning: the game fails on the zone at ${hunter}/objects.lua:4 and stops loading map zones there on every start."
+  local what='(car spawns, animals, basements, water and the like)'
+  check
+  expect_eq "$(cat "${WORK}/out")" "Config: Map is Greenport;Raven Creek;hunter's_base;Muldraugh, KY"
+  expect_eq "$(cat "${WORK}/err")" "${found}
+         So the maps before hunter's_base in Map= lose their zones ${what}: Greenport;Raven Creek, and hunter's_base loses its own zones from that line on.
+         Remove the mod HunterMod (workshop item 100), report the zone to the map's author, or set INI_Map to the Map= list above with hunter's_base moved to the front, so it only loses its own zones from that line on."
+  # The maps before it lose their zones, the vanilla map too when it comes before it.
+  set_ini_value "${ini}" Map "Greenport;hunter's_base;Raven Creek;Muldraugh, KY"
+  check
+  expect_line "${WORK}/err" "         So the maps before hunter's_base in Map= lose their zones ${what}: Greenport, and hunter's_base loses its own zones from that line on."
+  set_ini_value "${ini}" Map " Muldraugh, KY;Raven Creek;Greenport;hunter's_base"
+  check
+  expect_line "${WORK}/err" "         So every other map loses its zones ${what}, and hunter's_base loses its own zones from that line on."
+  set_ini_value "${ini}" Map "hunter's_base;Greenport;Muldraugh, KY"
+  check
+  expect_eq "$(cat "${WORK}/err")" "${found}
+         So hunter's_base loses its zones from that line on.
+         Remove the mod HunterMod (workshop item 100) or report the zone to the map's author."
+  # Two broken maps of one mod: the game never reaches the one earlier in Map=.
+  cp "${hunter}/objects.lua" "${hunter}_small/"
+  set_ini_value "${ini}" Map "Greenport;hunter's_base_small;hunter's_base;Muldraugh, KY"
+  check
+  expect_eq "$(cat "${WORK}/err")" "${found}
+         So the maps before hunter's_base in Map= lose their zones ${what}: Greenport;hunter's_base_small, and hunter's_base loses its own zones from that line on.
+         Once that zone is fixed, it stops at ${hunter}_small/objects.lua:4.
+         Remove the mod HunterMod (workshop item 100), report the zones to the maps' authors, or set INI_Map to the Map= list above with hunter's_base_small and hunter's_base moved to the front, so only those maps lose zones."
+  rm "${hunter}_small/objects.lua"
+
+  # A mod can replace the zone loader too. Once the loader no longer fails on these zones, nothing is
+  # checked.
+  local loader="${HOMEDIR}/Zomboid/mods/Loader/42/media/lua/server/metazones/metazoneHandler.lua" line
+  mkdir -p "$(dirname "${loader}")"
+  printf 'id=LoaderFix\n' > "${HOMEDIR}/Zomboid/mods/Loader/42/mod.info"
+  set_ini_value "${ini}" Mods '\HunterMod;\GreenMod;\RavenMod;\RavenExtraMod;\KingMod;\LoaderFix'
+  for line in 1 2; do
+    sed -n "${line}p" "${handler}" > "${loader}"
+    check
+    [ -s "${WORK}/err" ] && fail "checked the zones against a zone loader that doesn't fail on them: $(cat "${WORK}/err")"
+  done
+
+  # A mod that loads later replaces the file, here with one that works.
+  zones "${content}/500/mods/HunterFix/42/media/maps/hunter's_base/objects.lua" "${nav}"
+  printf '%s\n' 'id=HunterFix' 'require=\HunterMod' | mod_file 500/mods/HunterFix/42/mod.info
+  set_ini_value "${ini}" WorkshopItems '100;200;300;400;500'
+  set_ini_value "${ini}" Mods '\HunterFix;\GreenMod;\RavenMod;\RavenExtraMod;\KingMod'
+  check
+  [ -s "${WORK}/err" ] && fail "warned about a zone file that a later mod replaces: $(cat "${WORK}/err")"
+
+  # The version folder wins over common/, and the game reads objects.lua, regions.lua and roomtones.lua
+  # in turn. Besides water zones these stop it: in objects.lua a water flow without its properties, and
+  # a water zone with them but without width; in objects.lua and regions.lua a mannequin, and in
+  # roomtones.lua a room tone, without properties, each without x, y or z. Other zones of regions.lua
+  # go to Java. Files may have Windows line ends. The game stops at the last broken map in Map=, and
+  # reaches the others once that one is fixed.
+  zones "${green}/objects.lua" "${poly}"
+  zones "${split}/objects.lua" "${nav}"
+  zones "${green}/regions.lua" "${poly}" '{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 5, height = 1 },' \
+    '{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },'
+  zones "${green}/roomtones.lua" '{ name = "", type = "RoomTone", x = 1, z = 0, width = 5, height = 1 },'
+  zones "${raven}/objects.lua" \
+    "{ name = \"say \\\"{\\\"\", type = 'WaterFlow', x = 1, y = 1, width = 5, height = 1, properties = { WaterDirection = 90 } },"
+  zones "${raven}/regions.lua" '{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },'
+  zones "${king}/objects.lua" '{ name = "x = 1", type = "WaterZone", x = 1, y = 1, z = 0, width = nil, height = 1, properties = { WaterGround = "true", WaterShore = "true", width = 5 } },'
+  sed -i 's/$/\r/' "${king}/objects.lua"
+  set_ini_value "${ini}" Map 'Raven Creek Extra;Raven Creek;Greenport;Kingsmouth;Muldraugh, KY'
+  check
+  expect_eq "$(cat "${WORK}/err")" "Warning: the game fails on the zone at ${king}/objects.lua:2 and stops loading map zones there on every start.
+         So the maps before Kingsmouth in Map= lose their zones ${what}: Raven Creek Extra;Raven Creek;Greenport, and Kingsmouth loses its own zones from that line on.
+         Once that zone is fixed, it stops at ${green}/regions.lua:4, then at ${raven}/objects.lua:2.
+         Remove the mods KingMod (workshop item 400), GreenMod (workshop item 200) and RavenMod (workshop item 300), report the zones to the maps' authors, or set INI_Map to the Map= list above with Raven Creek, Greenport and Kingsmouth moved to the front, so only those maps lose zones."
+  rm "${green}/regions.lua"
+  zones "${raven}/objects.lua" '{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },'
+  set_ini_value "${ini}" Map 'Raven Creek;Greenport;Kingsmouth;Muldraugh, KY'
+  check
+  expect_line "${WORK}/err" "         Once that zone is fixed, it stops at ${green}/roomtones.lua:2, then at ${raven}/objects.lua:2."
+  expect_line "${WORK}/err" "         Remove the mods KingMod (workshop item 400), GreenMod (workshop item 200) and RavenMod (workshop item 300) or report the zones to the maps' authors."
+
+  # The game's own map comes from its media folder, with the game's own files.
+  rm "${green}/roomtones.lua" "${raven}/objects.lua" "${raven}/regions.lua" "${king}/objects.lua"
+  zones "${vanilla}/objects.lua" "${poly}"
+  check
+  expect_eq "$(cat "${WORK}/err")" "Warning: the game fails on the zone at ${vanilla}/objects.lua:2 and stops loading map zones there on every start.
+         So every other map loses its zones ${what}, and Muldraugh, KY loses its own zones from that line on.
+         Report the zone to the map's author or set INI_Map to the Map= list above with Muldraugh, KY moved to the front, so it only loses its own zones from that line on."
+  rm "${vanilla}/objects.lua"
+
+  # Maps of different items that share cells; the game's own map and maps of one item aren't compared.
+  # Each mod in Zomboid/mods counts as an item.
+  cells "${raven}" 10_10 10_11 11_10 11_11 12_12
+  cells "${content}/300/mods/RavenExtra/42/media/maps/Raven Creek Extra" 12_12
+  cells "${king}" 11_11 10_11 10_10 11_10 20_20
+  cells "${split}" 20_20
+  cells "${vanilla}" 10_10 20_20
+  local mod
+  for mod in A B; do
+    mkdir -p "${HOMEDIR}/Zomboid/mods/Local ${mod}/42"
+    printf 'id=Local%s\n' "${mod}" > "${HOMEDIR}/Zomboid/mods/Local ${mod}/42/mod.info"
+    cells "${HOMEDIR}/Zomboid/mods/Local ${mod}/42/media/maps/Local ${mod}" 30_30 30_31 30_32
+  done
+  set_ini_value "${ini}" Mods '\HunterFix;\GreenMod;\RavenMod;\RavenExtraMod;\KingMod;\LocalA;\LocalB'
+  set_ini_value "${ini}" Map 'Raven Creek;Raven Creek Extra;Greenport;Kingsmouth;Missing Map;Local A;Local B;Muldraugh, KY'
+  check
+  expect_eq "$(cat "${WORK}/err")" "Warning: the maps Raven Creek and Kingsmouth share 4 cells (10_10, 10_11, 11_10 and 1 more).
+         Raven Creek comes earlier in Map= (INI_Map), so where both have something on a square it wins, and Kingsmouth loses its buildings only where Raven Creek covers a whole cell.
+Warning: the maps Greenport and Kingsmouth share 1 cell (20_20).
+         Greenport comes earlier in Map= (INI_Map), so where both have something on a square it wins, and Kingsmouth loses its buildings only where Greenport covers a whole cell.
+Warning: the maps Local A and Local B share 3 cells (30_30, 30_31, 30_32).
+         Local A comes earlier in Map= (INI_Map), so where both have something on a square it wins, and Local B loses its buildings only where Local A covers a whole cell."
+  # The game reads a map's cells from the folder it reads the map from, here the version folder.
+  mv "${split}/20_20.lotheader" "${green}/"
+  check
+  grep -q 'Greenport and Kingsmouth' "${WORK}/err" && fail "compared the cells of a map folder the game doesn't read"
+
+  # Of two mods of one item, the one that loads later wins, even with a file in common/.
+  zones "${raven}/objects.lua" "${poly}"
+  zones "${content}/300/mods/RavenExtra/common/media/maps/Raven Creek/objects.lua" "${nav}"
+  set_ini_value "${ini}" Map 'Raven Creek;Muldraugh, KY'
+  check
+  [ -s "${WORK}/err" ] && fail "read a zone file that a mod loading later replaces: $(cat "${WORK}/err")"
+  rm -r "${content}/300/mods/RavenExtra/common"
+
+  # The game reads the zones of regions.lua from the table regions, those of the other files from
+  # objects. A long comment ends with its file. It can't compile a file that starts with a byte order
+  # mark, and reads none of its zones.
+  local dir="${HOMEDIR}/Zomboid/mods/Local A/42/media/maps/Local A"
+  printf '%s\n' 'objects = {' '--[[' > "${dir}/objects.lua"
+  printf '%s\n' 'objects = {' '{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },' '}' > "${dir}/regions.lua"
+  zones "${dir}/roomtones.lua" '{ name = "", type = "RoomTone", x = 1, y = 1, width = 5, height = 1 },'
+  set_ini_value "${ini}" Map 'Local A;Muldraugh, KY'
+  check
+  expect_line "${WORK}/err" "Warning: the game fails on the zone at ${dir}/roomtones.lua:2 and stops loading map zones there on every start."
+  zones "${dir}/regions.lua" '{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },'
+  { printf '\357\273\277-- saved by Notepad\n'; cat "${dir}/regions.lua"; } > "${WORK}/bom"
+  mv "${WORK}/bom" "${dir}/regions.lua"
+  check
+  expect_line "${WORK}/err" "Warning: the game fails on the zone at ${dir}/roomtones.lua:2 and stops loading map zones there on every start."
+  rm "${dir}/objects.lua" "${dir}/regions.lua" "${dir}/roomtones.lua"
+
+  # One zone at a time, with the line the game fails on ("-" for none): a missing x; the sums of a
+  # water zone with its properties; a water zone or flow without one of its properties, which needs
+  # x, y and z; the last of repeated keys; an animal zone without geometry; an unknown direction.
+  # Keys can be in brackets, a type must be a string, and only the properties table holds properties.
+  # Comments end where Lua ends them, and a long string can hold anything.
+  local file zone rows
+  rows="$(load_mods "${ini}" "${content}" "$(console_game_version)" 2> /dev/null)"
+  while IFS='|' read -r file line zone; do
+    file="${dir}/${file}"
+    zones "${file}" "$(printf '%b' "${zone}")"
+    check_maps "${ini}" "${rows}" > /dev/null 2> "${WORK}/err"
+    if [ "${line}" = - ]; then
+      [ -s "${WORK}/err" ] && fail "warned about zones the game doesn't fail on: ${zone}"
+    else
+      grep -qF "at ${file}:${line} and stops" "${WORK}/err" || fail "did not find the zone the game fails on at line ${line}: ${zone}"
+    fi
+    rm "${file}"
+  done <<'EOF'
+objects.lua|2|{ name = "", type = "WaterZone", y = 1, z = 0, width = 5, height = 1 },
+objects.lua|2|{ name = "", type = "WaterZone", y = 1, width = 5, height = 1, properties = { WaterGround = "true", WaterShore = "true" } },
+objects.lua|2|{ name = "", type = "WaterZone", x = 1, width = 5, height = 1, properties = { WaterGround = "true", WaterShore = "true" } },
+objects.lua|2|{ name = "", type = "WaterZone", x = 1, y = 1, width = 5, properties = { WaterGround = "true", WaterShore = "true" } },
+objects.lua|2|{ name = "", type = "WaterZone", x = 1, y = 1, width = 5, height = 1, properties = { WaterShore = "true" } },
+objects.lua|-|{ name = "", type = "WaterZone", x = 1, y = 1, z = 0, properties = { WaterGround = "true" } },
+objects.lua|2|{ name = "", type = "WaterFlow", x = 1, y = 1, width = 5, height = 1, properties = { WaterSpeed = 1 } },
+objects.lua|2|{ name = "", type = "WaterFlow", x = 1, y = 1, width = 5, height = 1, properties = { WaterDirection = 90, WaterSpeed = 1, WaterSpeed = nil } },
+objects.lua|2|{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 2, height = 2, x = nil },
+objects.lua|2|{ name = "", type = "Animal", x = 10, y = 10, z = 0, width = 20, height = 20, properties = { AnimalType = "cow" } },
+objects.lua|2|{ name = "", type = "Animal", z = 0, geometry = nil, points = { 1,1, 2,2 } },
+objects.lua|2|{ name = "", type = "ParkingStall", x = 1, y = 1, z = 0, width = 3, height = 6, properties = { Direction = "North" } },
+regions.lua|2|{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 2, height = 2, properties = { Direction = "n" } },
+objects.lua|-|{ name = "", type = "Vehicle", z = 0, geometry = "polygon", points = { 1,1, 2,2 }, properties = { Direction = "SW" } },
+objects.lua|-|{ name = "", type = "Mannequin", ["x"] = 1, ["y"] = 1, ["z"] = 0, width = 2, height = 2 },
+objects.lua|2|{ ["type"] = "WaterZone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },
+objects.lua|-|{ name = "", type = WaterZone, z = 0, geometry = "polygon", points = { 1,1, 2,2 } },
+objects.lua|2|{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 }, extra = { properties = { Outfit = "a" } } },
+roomtones.lua|-|{ name = "", type = "Mannequin", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },
+objects.lua|3|---[[\n{ name = "", type = "WaterZone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },\n--]]
+objects.lua|3|-- off: --[[ old\n{ name = "", type = "WaterZone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },
+objects.lua|-|--[==[\n]]\n{ name = "", type = "WaterZone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },\n]==]
+objects.lua|2|--[[ lake ]] { name = "", type = "WaterZone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },
+objects.lua|2|{ name = [[--]], type = "WaterZone", z = 0, geometry = "polygon", points = { 1,1, 2,2 } },
+EOF
+
+  # Build 41 reads the mod folder itself and takes a shared cell from the earlier map; its zones aren't
+  # checked.
+  echo 'LOG  : General     , 1700000000000> version=41.78.16 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
+  make_mod 600 Old OldMod "" "Old Map"
+  make_mod 700 Older OlderMod "" "Older Map"
+  cells "${content}/600/mods/Old/media/maps/Old Map" 3_3
+  cells "${content}/700/mods/Older/media/maps/Older Map" 3_3
+  zones "${content}/700/mods/Older/media/maps/Older Map/objects.lua" "${poly}"
+  set_ini_value "${ini}" WorkshopItems '600;700'
+  set_ini_value "${ini}" Mods 'OldMod;OlderMod'
+  set_ini_value "${ini}" Map ' Older Map; Old Map;;Older Map;Muldraugh, KY'
+  check
+  expect_eq "$(cat "${WORK}/out")" "Config: Map is  Older Map; Old Map;;Older Map;Muldraugh, KY"
+  expect_eq "$(cat "${WORK}/err")" "Warning: the maps Older Map and Old Map share 1 cell (3_3).
+         Older Map comes earlier in Map= (INI_Map), so those cells are Older Map's."
+
+  # The server loads the vanilla map for a blank Map=.
+  set_ini_value "${ini}" Map ' '
+  check
+  expect_eq "$(cat "${WORK}/out")" "Config: Map is Muldraugh, KY"
 }
 
 test_workshop() {
@@ -923,9 +1190,10 @@ test_configure() {
   printf 'id=LocalMap\n' > "${HOMEDIR}/Zomboid/mods/Local/42/mod.info"
   echo 'LOG  : General     , 1727000000000> versionNumber=42.21.0 demo=false' > "${HOMEDIR}/Zomboid/server-console.txt"
   configure_file_watcher() { printf '%s\n' "$@" > "${WORK}/watcher"; }
-  configure_server > /dev/null 2> "${WORK}/err"
+  configure_server > "${WORK}/out" 2> "${WORK}/err"
   # The startup warnings, the maps and the file watcher follow the Mods= of this start.
   expect_line "${WORK}/err" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.'
+  expect_line "${WORK}/out" 'Config: Map is Local Map;Muldraugh, KY'
   expect_line "${WORK}/watcher" /proc/sys/fs/inotify/max_user_watches
   grep -q "^load	Zomboid	Local	42	1	LocalMap	" "${WORK}/watcher" || fail "the file watcher did not get the mods that load"
   expect_eq "$(grep -c 'Mods=' "${WORK}/err")" 1
@@ -934,6 +1202,14 @@ test_configure() {
   expect_line "${SERVER}/pzserver.ini" 'RCONPassword=rcon from file'
   expect_line "${SERVER}/pzserver.ini" 'WorkshopItems='
   expect_eq "$(printf '%q ' "${ARGS[@]}")" "-Xms2048m -Xmx2048m -- -debug -adminusername boss -servername pzserver -port 17000 -steamvac true "
+  # UPnP is off unless a variable sets it, whatever its case.
+  expect_line "${SERVER}/pzserver.ini" 'UPnP=false'
+  unset INI_UPnP
+  export INI_UPNP=true
+  configure_server > /dev/null 2> "${WORK}/err"
+  expect_line "${SERVER}/pzserver.ini" 'UPnP=true'
+  grep -qi upnp "${WORK}/err" && fail "warned about UPnP: $(cat "${WORK}/err")"
+  unset INI_UPNP
 
   # Without the database the admin password is passed, and required.
   rm "${HOMEDIR}/Zomboid/db/pzserver.db"
@@ -1053,7 +1329,7 @@ EOF
   expect_line "${HOMEDIR}/preload" /usr/local/lib/no_file_watcher.so
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_list_env test_vars_documented test_game test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

@@ -18,6 +18,11 @@ services:
     stop_grace_period: 120s
     env_file:
       - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     ports:
       - "16261:16261/udp"
       - "16262:16262/udp"
@@ -77,6 +82,11 @@ Every restart brings the game up to date, which matters because updated clients 
 
 Maps of the mods the server loads are added to the `Map=` line automatically, before the vanilla map, with their spawn points. Since downloads happen while the server starts, a new map is added on the start after the one that downloaded it, and maps are only taken out once every item is downloaded. Taking a map mod out of `INI_Mods` removes its maps again, and so does a mod the server doesn't load.
 
+From the second start on, the log shows the `Map=` line (`Config: Map is ...`) and warns about two problems with maps:
+
+* A zone the game fails on, such as a water zone drawn as a polygon. The game reads the maps from the last in `Map=` to the first and stops loading map zones at that zone on every start, so the maps before its map in `Map=` lose their car spawns, animals, basements, water and the like. Remove that map's mod, report it to the map's author, or put the map first in `Map=` (set `INI_Map` to the whole list in your order) so it only loses its own zones. When several maps have such a zone, the warning names them all, since fixing one only moves the stop to the next.
+* Maps of different workshop items that share cells. Where both have something on a square, the one earlier in `Map=` wins. If the other one should, change the order with `INI_Map`.
+
 `docker exec <container> list-mods > mods.json` describes your workshop items and every mod in them: requirements, load order hints, maps and sandbox options. Load that file on the [mods page](https://gameserver-images.github.io/Project-Zomboid/mods.html) to pick and order mods and set their sandbox options, then copy the `.env` lines it writes. The log also warns at startup about enabled mods the server can't find or won't load, saying why, and about mods that load in the wrong order or conflict.
 
 With many mods the game can need more inotify watches than the host allows (`fs.inotify.max_user_watches`, a limit shared by every program of the same user on the host), and the server then stops while it starts. Every start checks this. When the game would need more than half of the limit, the log says so and the game's file watcher is off for that start; it only reloads game and mod files that change while the server runs. It is also off for a start that can't count the mod folders yet, because workshop items are still to download or the server hasn't logged its game version. To keep it on, raise the limit on the Docker host (not in the container):
@@ -106,6 +116,8 @@ On a NAS that resets `/etc` on a reboot or update (Synology, Unraid), run the fi
 | 8766-8767/udp | Steam, Build 41 only | `STEAMPORT1`, `STEAMPORT2` |
 
 Forward the UDP ports in your firewall or router. If you change a port variable, change the published port to match. The log prints the ports on every start, and the [wiki](https://pzwiki.net/wiki/Dedicated_server) has more on them.
+
+Unless you set `INI_UPnP`, the image sets it to `false`, since the game's UPnP can't reach your router from Docker's network and only slows down the start; `INI_UPnP=true` only makes sense with `network_mode: host`.
 
 ## Image versions
 

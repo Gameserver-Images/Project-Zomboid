@@ -6,6 +6,8 @@
 . "${SCRIPT_DIR}/lib/config.sh"
 # shellcheck source=scripts/lib/mods.sh
 . "${SCRIPT_DIR}/lib/mods.sh"
+# shellcheck source=scripts/lib/maps.sh
+. "${SCRIPT_DIR}/lib/maps.sh"
 # shellcheck source=scripts/lib/args.sh
 . "${SCRIPT_DIR}/lib/args.sh"
 # shellcheck source=scripts/lib/watcher.sh
@@ -56,11 +58,14 @@ configure_server() {
   [ -f "${ini_file}" ] || touch "${ini_file}"
 
   apply_preset "${lua_file}"
+  # The game's UPnP can't reach the router from Docker's bridge network and delays every start by 12s.
+  grep -qixE 'INI_UPnP(_FILE)?' <<< "$(compgen -e)" || export INI_UPnP=false
   apply_ini_env "${ini_file}"
 
   apply_workshop_ids "${ini_file}" "${content_dir}"
   mods="$(load_mods "${ini_file}" "${content_dir}" "$(console_game_version)")"
   apply_mod_maps "${ini_file}" "${spawn_file}" "${content_dir}" "${mods}"
+  check_maps "${ini_file}" "${mods}"
   apply_sandbox_env "${lua_file}"
 
   # The admin account lives in the server database, so the password is only needed to create it.

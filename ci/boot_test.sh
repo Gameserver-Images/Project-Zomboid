@@ -2,7 +2,8 @@
 # Boots an image on a game branch and checks that it installs the game, starts the
 # server, keeps settings written before its first start, creates its database and saves on
 # `docker stop`, then starts it again to check the update and the settings against the files the
-# server wrote. Then, with the host's inotify watch limit below what the game watches with a mod, it
+# server wrote. On Build 42 a start with a test mod checks how the game's map zone loader takes a zone
+# without x and y. Then, with the host's inotify watch limit below what the game watches with a mod, it
 # checks that the image turns the game's file watcher off, and whether the game still needs that. That
 # limit holds for every user of the host for a few minutes, a desktop's programs included. Writes the
 # env reference for the docs site to <out dir>/<branch>-<build id>.json, with the image version from
@@ -89,6 +90,9 @@ echo "Installed ${label}, build ${build}"
 
 docker exec "${name}" grep -qx 'PublicName=Boot test' "${home}/Server/pzserver.ini" \
   || fail "INI_PublicName written before the first start was not kept"
+docker exec "${name}" grep -qx 'UPnP=false' "${home}/Server/pzserver.ini" \
+  || fail "the image did not turn UPnP off by default"
+grep -q 'set UPnP=false' <<< "$(docker logs "${name}" 2>&1)" && fail "the server looked for a UPnP gateway"
 docker exec "${name}" test -f "${home}/db/pzserver.db" \
   || fail "no database at Zomboid/db/pzserver.db; configure.sh uses it to tell the first start apart"
 docker exec "${name}" test -s "${home}/Server/pzserver_SandboxVars.lua" \
@@ -127,10 +131,40 @@ docker exec "${name}" grep -qx 'PublicName=Boot test' "${home}/Server/pzserver.i
   || fail "PublicName did not survive a restart"
 docker exec "${name}" grep -qE '^[[:space:]]*Transmission = 4,' "${home}/Server/pzserver_SandboxVars.lua" \
   || fail "SANDBOX_ZombieLore__Transmission was not applied on the second start"
+# From the second start the game version is known, so the maps in Map= are checked, the game's own too.
+logs="$(docker logs "${name}" 2>&1)"
+grep -qx 'Config: Map is Muldraugh, KY' <<< "${logs}" || fail "the second start did not name the maps in Map="
+grep -q 'stops loading map zones' <<< "${logs}" && fail "the zone check failed the game's own map"
 # Once the database exists the admin password must stay out of the command line.
 docker exec "${name}" sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " "' | grep -q -- '-adminpassword' \
   && fail "-adminpassword was passed although the database exists"
 stop_server 2
+
+# map_zone_warnings counts the zones the zone loader's Lua code fails on, not those it passes to Java
+# without x and y. This start finds out whether the game takes those: a mod's regions.lua for the vanilla map
+# has a polygon Region zone, which goes to Java without x and y, and after it a mannequin zone without
+# properties, which the game logs. Build 41 has another zone loader.
+if [[ "${version}" != 41.* ]]; then
+  docker rm -f "${name}" >/dev/null
+  docker volume rm -f "${home_volume}" >/dev/null
+  docker run --rm -v "${home_volume}:${home}" --entrypoint bash "${image}" -c \
+    'mkdir -p "$1/media/maps/Muldraugh, KY" && printf "id=BootZones\n" > "$1/mod.info" \
+      && printf "%s\n" "regions = {" "$2" "$3" "}" > "$1/media/maps/Muldraugh, KY/regions.lua"' \
+    _ "${home}/mods/BootZones/common" \
+    '{ name = "", type = "Region", z = 0, geometry = "polygon", points = { 10,10, 20,10, 20,20 } },' \
+    '{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 1, height = 1 },'
+  docker run -d --name "${name}" --health-interval=5s \
+    -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
+    -e GAME_UPDATE=false -e ADMINPASSWORD=boot-test -e INI_Mods=BootZones "${image}" >/dev/null
+  wait_healthy || fail "the server with the BootZones mod exited before it started"
+  if grep -q 'Mannequin zone missing properties in media/maps/Muldraugh, KY/regions.lua' <<< "$(docker logs "${name}" 2>&1)"; then
+    echo "The game's map zone loader takes a zone that goes to Java without x and y"
+  else
+    echo "::warning title=Zone check::On ${label} a zone that goes to Java without x and y stops the game's map zone loading, so map_zone_warnings misses those zones and should count them too."
+  fi
+  stop_server 1
+  docker rm -f "${name}" >/dev/null
+fi
 
 # The game stops when it runs out of inotify watches in its media folder or in a mod folder. With a
 # limit of one and a half times the folders of its media folder and a mod with twice as many, the
