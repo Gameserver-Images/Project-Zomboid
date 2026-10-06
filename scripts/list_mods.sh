@@ -1,7 +1,8 @@
 #!/bin/bash
 # Prints one JSON document for the mods page of the docs site: the workshop items of WORKSHOP_IDS,
-# of the server's WorkshopItems and on disk, with their Steam details and the mods in them, and each
-# mod's requirements, maps and sandbox options for the version of the installed game.
+# of the server's WorkshopItems and on disk, with their Steam details and the mods in them, each
+# mod's requirements, maps and sandbox options for the version of the installed game, and the server's
+# INI settings without its secrets.
 # Usage: list-mods > mods.json
 
 set -euo pipefail
@@ -198,7 +199,7 @@ mod_info_rows "${version}" "${content_dir}"/*/mods > "${tmp}/mods"
   $1 == "map" { print }
 ' > "${tmp}/files"
 
-bash "${SCRIPT_DIR}/list_env.sh" --tsv | awk -F '\t' '$1 == "sandbox"' > "${tmp}/current"
+bash "${SCRIPT_DIR}/list_env.sh" --tsv | awk -F '\t' '$1 == "ini" || $1 == "sandbox"' > "${tmp}/settings"
 
 jq -n -c \
   --arg version "${version}" \
@@ -213,7 +214,7 @@ jq -n -c \
   --rawfile downloaded "${tmp}/downloaded" \
   --rawfile mods "${tmp}/mods" \
   --rawfile files "${tmp}/files" \
-  --rawfile current "${tmp}/current" '
+  --rawfile settings "${tmp}/settings" '
   def lines: split("\n") | map(select(length > 0));
   def rows: lines | map(split("\t"));
   def text: if . == "" then null else . end;
@@ -231,7 +232,8 @@ jq -n -c \
      + [$files | map(select(.[0] == "label")) | group_by(.[1] + "\t" + .[2])[]
         | {key: .[0][1], rank: .[0][2], labels: (map({key: .[3], value: (.[4:] | join("\t") | gsub("\\\\(?<c>.)"; .c))}) | from_entries)}]
      | group_by(.key) | map({key: .[0].key, value: (sort_by(.rank) | reverse | map(.labels) | add)}) | from_entries) as $labels
-  | ($current | rows | map({key: (.[1] | ascii_downcase), value: (.[2] // "" | unquote)}) | from_entries) as $current
+  | ($settings | rows) as $settings
+  | ($settings | map(select(.[0] == "sandbox") | {key: (.[1] | ascii_downcase), value: (.[2] // "" | unquote)}) | from_entries) as $current
   | ($files | map(select(.[0] == "option")
       | {key: .[1], rank: .[2], seq: (.[3] | tonumber), env: ("SANDBOX_" + (.[4] | split(".") | join("__"))), option: .[4],
          type: .[5], default: .[6], min: .[7], max: .[8], page: .[9], translation: .[10], valueTranslation: .[11], numValues: .[12]})
@@ -268,7 +270,10 @@ jq -n -c \
       format: 2,
       gameVersion: $version,
       workshopIds: ($workshop_ids | lines),
-      server: {mods: ($server_mods | lines), map: ($server_map | lines), workshopItems: ($server_items | lines)},
+      server: {mods: ($server_mods | lines), map: ($server_map | lines), workshopItems: ($server_items | lines),
+        # Without the keys list-env masks (password, token) and webhook URLs, which hold a token of their own.
+        options: ($settings | map(select(.[0] == "ini") | {key: (.[1] | ltrimstr("INI_")), value: (.[2] // "")}
+          | select(.key | ascii_downcase | test("password|token|webhook") | not)) | from_entries)},
       collections: [$tree[] | select(.children != null) | {id, title: $info[.id].title, children: [.children[].id]}],
       items: [
         [$tree[] | if .children == null then .id else .children[] | select(.collection | not) | .id end]

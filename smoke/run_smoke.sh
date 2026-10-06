@@ -760,6 +760,11 @@ EOF
   set_ini_value "${SERVER}/pzserver.ini" Mods '\MultiMod;2392709985\TsarLib; \OldMod;'
   set_ini_value "${SERVER}/pzserver.ini" Map 'Variant Map;Muldraugh, KY'
   set_ini_value "${SERVER}/pzserver.ini" WorkshopItems '101;102;105'
+  # Secrets stay out of the output; the INI has comments and a value with '=' in it.
+  set_ini_value "${SERVER}/pzserver.ini" Password hunter2
+  set_ini_value "${SERVER}/pzserver.ini" RCONPassword rcon-secret
+  printf '%s\n' '# The bot token' 'discordtoken=discord-secret' 'WebhookAddress=https://hooks.example/webhook-secret' \
+    'WebhookAddress =https://hooks.example/space-secret' 'DoLuaChecksum=true' 'ServerWelcomeMessage=Hi <RGB:1,0,0> a=b' >> "${SERVER}/pzserver.ini"
   cat > "${SERVER}/pzserver_SandboxVars.lua" <<'EOF'
 SandboxVars = {
     Zombies = 4,
@@ -773,7 +778,10 @@ EOF
 
   (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") || { fail "list-mods failed"; cat "${WORK}/err" >&2; return; }
   jq -e '.format == 2 and .gameVersion == "42.21.0" and .workshopIds == ["900", "104"]' "${out}" > /dev/null || fail "wrong header"
-  expect_eq "$(jq -c .server "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
+  expect_eq "$(jq -c '.server | del(.options)' "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
+  expect_eq "$(jq -c .server.options "${out}")" \
+    '{"PVP":"true","Public":"false","PublicName":"My PZ Server","UPnP":"true","Mods":"\\MultiMod;2392709985\\TsarLib; \\OldMod;","Map":"Variant Map;Muldraugh, KY","WorkshopItems":"101;102;105","DoLuaChecksum":"true","ServerWelcomeMessage":"Hi <RGB:1,0,0> a=b"}'
+  grep -qE 'hunter2|rcon-secret|discord-secret|webhook-secret|space-secret|\(set\)' "${out}" && fail "list-mods printed a secret"
   expect_eq "$(jq -c .collections "${out}")" '[{"id":"900","title":"Item 900","children":["101","910","102"]},{"id":"910","title":"Item 910","children":["103","920"]},{"id":"920","title":"Item 920","children":[]}]'
   expect_eq "$(jq -c '[.items[] | [.id, .available, .downloaded, (.mods | map(.folder))]]' "${out}")" \
     '[["101",true,true,["Addon","Multi Version"]],["102",true,true,["Old Mod"]],["103",true,false,[]],["104",false,true,["Hidden"]],["105",true,false,[]],["106",true,true,["Loose","No Id","No Version"]],["108",true,true,["Bad","Capped","Spaces"]]]'

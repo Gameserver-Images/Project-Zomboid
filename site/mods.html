@@ -143,6 +143,12 @@
     .opt-control input:not([type="checkbox"]), .opt-control select { flex: 1 1 auto; width: 100%; }
     .opt-control input[type="checkbox"] { width: 18px; height: 18px; margin: 0 auto 0 0; }
 
+    .asks { list-style: none; margin: 6px 0 0; padding: 0; }
+    .ask { border-top: 1px solid var(--border); padding: 8px 0; }
+    .ask-line { border-left: 3px solid var(--border); padding-left: 8px; overflow-wrap: anywhere; }
+    .ask.bad .ask-line { border-left-color: var(--bad); }
+    .ask > .opt-info, .ask > .bar { margin: 4px 0 0 11px; }
+
     .problem-kind > summary { cursor: pointer; padding: 2px 0; }
     .problem-kind.info > summary { color: var(--muted); }
     .problem-kind ul { list-style: none; margin: 2px 0 8px; padding-left: 14px; font-size: 0.88rem; }
@@ -186,7 +192,7 @@
     <p id="remember-note" class="muted" hidden></p>
     <details id="import" class="panel">
       <summary>Import an existing .env</summary>
-      <p class="hint">Paste your env file. <code>INI_Mods</code> sets the enabled mods and their order; <code>SANDBOX_</code> values of these mods, <code>INI_Map</code> and <code>WORKSHOP_IDS</code> replace the ones here. Other lines are ignored.</p>
+      <p class="hint">Paste your env file. <code>INI_Mods</code> sets the enabled mods and their order; <code>SANDBOX_</code> values of these mods, the <code>INI_</code> settings their workshop pages ask for, <code>INI_Map</code> and <code>WORKSHOP_IDS</code> replace the ones here. Other lines are ignored.</p>
       <textarea id="env-text" rows="6" aria-label=".env contents"></textarea>
       <div class="bar"><button id="env-import" type="button" class="primary">Import</button></div>
       <p id="env-report" class="muted" role="status"></p>
@@ -199,6 +205,7 @@
           <button type="button" role="tab" id="tab-button-order" data-tab="order" aria-controls="tab-order">Load order <span class="n" id="count-order"></span></button>
           <button type="button" role="tab" id="tab-button-maps" data-tab="maps" aria-controls="tab-maps">Maps <span class="n" id="count-maps"></span></button>
           <button type="button" role="tab" id="tab-button-sandbox" data-tab="sandbox" aria-controls="tab-sandbox">Sandbox <span class="n" id="count-sandbox"></span></button>
+          <button type="button" role="tab" id="tab-button-server" data-tab="server" aria-controls="tab-server">Server settings <span class="n" id="count-server"></span></button>
         </div>
 
         <section id="tab-pick" role="tabpanel" aria-labelledby="tab-button-pick">
@@ -241,6 +248,13 @@
           <p id="sandbox-empty" class="empty" hidden>No enabled or required mod has sandbox options.</p>
           <div id="sandbox-list"></div>
         </section>
+
+        <section id="tab-server" role="tabpanel" aria-labelledby="tab-button-server" hidden>
+          <p class="hint">Server settings the mods ask for: each item whose mods are enabled or load, with the lines on its workshop page that ask for a setting in <code>pzserver.ini</code>. Add an <code>INI_</code> line to the .env lines to set it.</p>
+          <p id="server-unknown" class="hint" hidden>The server's current values are unknown: this list-mods output comes from an older image, or the server hasn't written <code>pzserver.ini</code> yet. Run list-mods again once the server has started with an updated image.</p>
+          <p id="server-empty" class="empty" hidden>The workshop pages of these items ask for no server setting.</p>
+          <div id="server-list"></div>
+        </section>
       </div>
 
       <aside>
@@ -269,13 +283,27 @@
   const JSON_KEY = 'pz-mods:json';
   const STATE_KEY = 'pz-mods:state';
   const LOAD_KEY = 'pz-mods:load';
-  const TABS = ['pick', 'order', 'maps', 'sandbox'];
+  const TABS = ['pick', 'order', 'maps', 'sandbox', 'server'];
+  // INI keys the page writes already: Mods, Map, and WorkshopItems through WORKSHOP_IDS.
+  const MANAGED_KEYS = new Set(['mods', 'map', 'workshopitems']);
+  // The anti-cheat options of 42.20.2 (1 bans, 2 kicks, 3 logs, 4 is off), and the Build 41 types whose check one of them
+  // makes (41.78 and 42.20.2 game code); the other types check what 42.20.2 doesn't. Older Build 42 versions split the
+  // checks differently.
+  const ANTICHEATS = ['Safety', 'Speed', 'NoClip', 'Hit', 'PacketException', 'Permission', 'XP', 'SafeHouse', 'Player', 'Checksum'].map(name => `AntiCheat${name}`);
+  const B41_ANTICHEATS = new Map([[1, 'AntiCheatSafety'], [2, 'AntiCheatSpeed'], [3, 'AntiCheatHit'], [4, 'AntiCheatHit'], [6, 'AntiCheatPlayer'],
+    [8, 'AntiCheatPermission'], [9, 'AntiCheatXP'], [10, 'AntiCheatPacketException'], [13, 'AntiCheatPacketException'], [19, 'AntiCheatSafeHouse']]);
+  // The anti-cheat settings of 41.78: one per type, and a threshold multiplier for some types.
+  const B41_KEYS = [...Array.from({ length: 24 }, (_, i) => [`AntiCheatProtectionType${i + 1}`, 'boolean']),
+    ...[2, 3, 4, 9, 15, 20, 22, 24].map(n => [`AntiCheatProtectionType${n}ThresholdMultiplier`, 'number'])];
+  const B41_ANTICHEAT_RE = /anti[- ]?cheat\s*(?:protection\s*)?(?:type\s*)?#?(\d+)(thresholdmultiplier)?(?!\w)/i;
+  const OFF_RE = /\b(?:disabl|deactivat)\w*|\b(?:turn|switch)\w*(?:\s+[\w-]+){0,3}\s+off\b|\bfalse\b/i;
   const HINT_RE = /load (it |this |them )?(after|before|first|last)|load order|requires?|required|dependenc|incompatib|conflict|not compatible|don'?t use with|mod ?id|workshop ?id/i;
   const PROBLEM_KINDS = [
     ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
     ['version', () => `Don't load on ${model.gameVersion}`],
     ['order', 'Load order'],
     ['incompatible', 'Incompatible mods'],
+    ['setting', 'Server settings the mods ask for', 'Their workshop pages ask for values other than the ones the server has or the .env lines set. Server settings has the INI_ line for each.'],
     ['duplicate', 'Mod IDs in several items'],
     ['unknown', 'Enabled but not in any downloaded item'],
     ['uncovered', () => `Items missing from ${listName()}`, () => (state.workshopIds.length
@@ -290,6 +318,7 @@
     ['pending', 'Mods from items not downloaded yet', "These items' descriptions name the mod IDs. The container downloads the items on its next start. Run list-mods again after that to check the mods."],
     ['notDownloaded', 'Items not downloaded yet', 'The container downloads them on its next start. Run list-mods again after that to see their mods.'],
     ['empty', 'Downloaded items without mods', 'The game finds no mod.info in them, so they add nothing.'],
+    ['settingInfo', 'Items that mention server settings', "Their workshop pages mention server settings, but these are already set as asked, the page can't check them, or the items' mods don't load. Server settings shows the lines."],
   ];
   const $ = id => document.getElementById(id);
 
@@ -303,6 +332,7 @@
   let orderRows = new Map();
   let bandRows = new Map();
   let mapRows = new Map();
+  let settingNodes = new Map();
   let loadId = null;   // ties the saved state to the file it was made for
   let dragging = null;
   let searchTimer = null;
@@ -363,6 +393,13 @@
 
   // Long lines wrap after a ';' or '__' rather than inside a mod ID or name.
   const breakable = value => value.split(/(;|__)/).flatMap(part => (part === ';' || part === '__' ? [part, h('wbr')] : [part]));
+
+  const clip = line => (line.length > 300 ? `${line.slice(0, 300)}…` : line);
+
+  const said = value => (value === '' ? 'an empty value' : value);
+
+  // Docker Compose and the import end an unquoted value at ' #' and take off the quotes around one.
+  const envValue = v => (/\s#|^\s|\s$|^["']/.test(v) ? (v.includes("'") ? `"${v.replace(/[\\"]/g, '\\$&')}"` : `'${v}'`) : v);
 
   const formatDate = t => (typeof t === 'number' ? new Date(t * 1000).toISOString().slice(0, 10) : null);
 
@@ -432,14 +469,30 @@
 
   function buildModel(json) {
     const server = json.server && typeof json.server === 'object' ? json.server : {};
+    const options = server.options && typeof server.options === 'object' && !Array.isArray(server.options)
+      ? Object.entries(server.options).filter(([, v]) => typeof v === 'string') : [];
+    // An older image leaves the field out, and before the server's first start pzserver.ini doesn't exist.
+    const settings = options.length ? new Map(options) : null;
+    const b41 = Number(json.gameVersion.split('.')[0]) < 42;
     const m = {
       gameVersion: json.gameVersion,
-      b41: Number(json.gameVersion.split('.')[0]) < 42,
+      b41,
+      b4220: !b41 && versionNumber(json.gameVersion) >= 42020,
       workshopIds: [...new Set(texts(json.workshopIds))],
-      server: { mods: texts(server.mods), map: texts(server.map), workshopItems: texts(server.workshopItems) },
+      // settings: the server's pzserver.ini, null when the file doesn't say
+      server: { mods: texts(server.mods), map: texts(server.map), workshopItems: texts(server.workshopItems), settings },
       items: new Map(), collections: new Map(), instances: new Map(), byModId: new Map(), options: new Map(),
-      modMaps: new Set(), categories: new Set(),
+      modMaps: new Set(), categories: new Set(), iniKeys: new Map(),
     };
+    // The keys of pzserver.ini by their lower case: DoLuaChecksum, then the server's, or without them the anti-cheat
+    // settings the game code shows for this version.
+    const known = settings ? [] : m.b41 ? B41_KEYS : m.b4220 ? ANTICHEATS.map(key => [key, 'number']) : [];
+    for (const [key, type] of [['DoLuaChecksum', 'boolean'], ...known]) m.iniKeys.set(key.toLowerCase(), { key, type, value: null });
+    for (const [key, value] of settings || []) {
+      m.iniKeys.set(key.toLowerCase(), { key, type: /^(true|false)$/i.test(value) ? 'boolean' : /^-?\d+(\.\d+)?$/.test(value) ? 'number' : 'text', value });
+    }
+    const antiCheats = [...m.iniKeys.values()].map(({ key }) => key).filter(key => /^AntiCheat\w+$/i.test(key));
+    m.antiCheatRe = !m.b41 && antiCheats.length ? new RegExp(`\\b(${antiCheats.join('|')})\\b`, 'i') : null;
     for (const c of list(json.collections)) {
       if (typeof c?.id === 'string') m.collections.set(c.id, { id: c.id, title: text(c.title), children: texts(c.children) });
     }
@@ -449,7 +502,7 @@
         id: raw.id, available: raw.available === true, title: text(raw.title), description: text(raw.description),
         updated: typeof raw.updated === 'number' ? raw.updated : null, size: typeof raw.size === 'number' ? raw.size : null,
         requiredItems: Array.isArray(raw.requiredItems) ? texts(raw.requiredItems) : [],
-        downloaded: raw.downloaded === true, mods: [], declared: [], hints: null,
+        downloaded: raw.downloaded === true, mods: [], declared: [], hints: null, asks: null,
       };
       m.items.set(item.id, item);
       for (const rawMod of list(raw.mods)) {
@@ -621,12 +674,74 @@
     return null;
   }
 
+  // ---- Server settings in descriptions ----
+
+  function iniValue(type, raw) {
+    const v = raw.trim();
+    if (type === 'boolean') return /^(true|false)\b/i.exec(v)?.[1].toLowerCase() ?? null;
+    if (type === 'number') return /^-?\d+(\.\d+)?(?!\w|\.\d)/.exec(v)?.[0] ?? null;
+    return v;
+  }
+
+  // What a description line asks of pzserver.ini, as { key, value, note } with any of them null; null when it asks
+  // nothing. A Key=Value line counts when the server has the key, other lines when they are about the Lua checksum
+  // or anti-cheat.
+  function settingAsk(line) {
+    const pair = /^([A-Za-z][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
+    const known = pair && model.iniKeys.get(pair[1].toLowerCase());
+    if (known && MANAGED_KEYS.has(pair[1].toLowerCase())) return null;
+    // Lines of SandboxVars.lua end with a comma; the rules below still read one about the checksum or anti-cheat.
+    if (known && !pair[2].endsWith(',')) return { key: known.key, value: iniValue(known.type, pair[2]), note: null };
+    if (!/checksum|cheat/i.test(line)) return null;
+    const off = OFF_RE.test(line);
+    if (/lua[- ]?checksum/i.test(line)) return { key: model.iniKeys.get('doluachecksum').key, value: off ? 'false' : null, note: null };
+    const named = model.antiCheatRe?.exec(line);
+    if (named) return { key: model.iniKeys.get(named[1].toLowerCase()).key, value: off ? '4' : null, note: null };
+    const b41 = B41_ANTICHEAT_RE.exec(line);
+    const type = Number(b41?.[1]);
+    if (type >= 1 && type <= 24) {
+      const name = `AntiCheatProtectionType${type}${b41[2] ? 'ThresholdMultiplier' : ''}`;
+      if (model.b41) {
+        const key = model.iniKeys.get(name.toLowerCase())?.key;
+        return key ? { key, value: off && !b41[2] ? 'false' : null, note: null } : { key: null, value: null, note: `The server has no ${name} setting.` };
+      }
+      const now = !b41[2] && model.b4220 && model.iniKeys.get(B41_ANTICHEATS.get(type)?.toLowerCase())?.key;
+      if (now) return { key: now, value: off ? '4' : null, note: `Build 41 called this check ${name}; in Build 42 it is ${now}.` };
+      const why = b41[2] ? 'Build 42 has no threshold multipliers.'
+        : model.b4220 && !B41_ANTICHEATS.has(type) ? 'In Build 42.20, no setting makes the same check.'
+          : `The page can't tell which setting makes the same check on ${model.gameVersion}.`;
+      return { key: null, value: null, note: `This names ${name}, a Build 41 setting. ${why}` };
+    }
+    return /checksum|anti[- ]?cheat/i.test(line) ? { key: null, value: null, note: null } : null;
+  }
+
+  function itemAsks(item) {
+    item.asks ??= [...new Set(plainLines(item.description || ''))].flatMap(line => {
+      const ask = settingAsk(line);
+      return ask ? [{ ...ask, line: clip(line) }] : [];
+    });
+    return item.asks;
+  }
+
+  // true and false in any case, numbers by value.
+  function sameValue(a, b) {
+    const [x, y] = [a.trim(), b.trim()];
+    if (/^(true|false)$/i.test(x)) return x.toLowerCase() === y.toLowerCase();
+    if (/^-?\d+(\.\d+)?$/.test(x) && /^-?\d+(\.\d+)?$/.test(y)) return Number(x) === Number(y);
+    return x === y;
+  }
+
+  const serverValue = key => model.iniKeys.get(key.toLowerCase())?.value ?? null;
+  // The value the server has once it reads the .env lines; null when unknown.
+  const iniNow = key => (Object.hasOwn(state.ini, key) ? state.ini[key] : serverValue(key));
+
   // ---- State ----
 
   function initialState() {
     return {
       mods: modIds(model.server.mods.join(';')),
       values: {},
+      ini: {},
       bandMode: 'collection',
       bandOrder: { collection: [], category: [] },
       maps: model.server.map.slice(),
@@ -644,6 +759,8 @@
     if (Array.isArray(saved.mods)) s.mods = [...new Set(texts(saved.mods).filter(Boolean))];
     const values = saved.values && typeof saved.values === 'object' ? saved.values : {};
     for (const [env, value] of Object.entries(values)) if (typeof value === 'string' && model.options.has(env)) s.values[env] = value;
+    const ini = saved.ini && typeof saved.ini === 'object' ? saved.ini : {};
+    for (const [key, value] of Object.entries(ini)) if (typeof value === 'string') s.ini[key] = value;
     if (saved.bandMode === 'category') s.bandMode = 'category';
     for (const mode of ['collection', 'category']) s.bandOrder[mode] = texts(saved.bandOrder?.[mode]);
     if (Array.isArray(saved.maps)) s.maps = texts(saved.maps);
@@ -899,7 +1016,24 @@
     }
     // Sandbox options: the mods that load, then the enabled ones that don't.
     const modsWithOptions = [...loaded, ...rows.filter(entry => !loadPos.has(entry.id))].map(entry => entry.inst).filter(inst => inst?.mod.sandbox.length);
-    derived = { rows, rowOf, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions };
+    // Server settings, in the same order. Only an item whose mods load needs what it asks for.
+    const loadingItems = new Set(loaded.map(entry => entry.item?.id));
+    const settings = [...new Set([...loaded, ...rows].map(entry => entry.item).filter(Boolean))].filter(item => itemAsks(item).length).map(item => {
+      const loads = loadingItems.has(item.id);
+      const asks = itemAsks(item).map(ask => {
+        const now = ask.key && iniNow(ask.key);
+        return { ...ask, problem: loads && ask.value !== null && now !== null && !sameValue(now, ask.value) };
+      });
+      const go = () => goToSetting(item.id);
+      const wrong = new Map(asks.filter(ask => ask.problem).map(ask => [`${ask.key}=${ask.value}`, ask]));
+      for (const { key, value } of wrong.values()) {
+        p.setting.push({ text: `${itemTitle(item)}: ${key}=${value}, ${Object.hasOwn(state.ini, key) ? 'the .env lines set' : 'the server has'} ${said(iniNow(key))}`, go });
+      }
+      if (!wrong.size) p.settingInfo.push({ text: itemTitle(item), go });
+      return { item, loads, asks };
+    });
+    const settingKeys = [...new Set(settings.flatMap(({ asks }) => asks.map(ask => ask.key)).filter(Boolean))];
+    derived = { rows, rowOf, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions, settings, settingKeys };
     derived.maps = mapList(loaded);
     derived.output = output();
   }
@@ -929,6 +1063,7 @@
     if (state.workshopIds.length) lines.push(`WORKSHOP_IDS=${state.workshopIds.join(';')}`);
     lines.push(`INI_Mods=${state.mods.map(id => (model.b41 ? id : `\\${id}`)).join(';')}`);
     if (state.includeMap) lines.push(`INI_Map=${derived.maps.map(entry => entry.name).join(';')}`);
+    for (const key of derived.settingKeys) if (Object.hasOwn(state.ini, key)) lines.push(`INI_${key}=${envValue(state.ini[key])}`);
     const seen = new Set();
     let changed = 0;
     let skipped = 0;
@@ -1051,6 +1186,7 @@
     $('count-order').textContent = derived.rows.length;
     $('count-maps').textContent = derived.maps.length;
     $('count-sandbox').textContent = derived.output.changed ? `${derived.output.changed} changed` : '';
+    $('count-server').textContent = derived.settings.reduce((n, { asks }) => n + asks.length, 0);
   }
 
   function showTab(tab) {
@@ -1072,6 +1208,7 @@
     if (state.tab === 'order') renderOrder();
     else if (state.tab === 'maps') renderMaps();
     else if (state.tab === 'sandbox') renderSandbox();
+    else if (state.tab === 'server') renderServer();
   }
 
   function flash(node) {
@@ -1109,6 +1246,14 @@
     switchTab('pick');
     renderPick();
     const node = itemNodes.get(itemId);
+    if (!node) return;
+    flash(node);
+    node.focus({ preventScroll: true });
+  }
+
+  function goToSetting(itemId) {
+    switchTab('server');
+    const node = settingNodes.get(itemId);
     if (!node) return;
     flash(node);
     node.focus({ preventScroll: true });
@@ -1351,7 +1496,7 @@
     const description = item.description || '';
     // The uploader's own "Workshop ID:" and "Mod ID:" lines say nothing about other mods.
     const lines = [...new Set(plainLines(description).filter(line => HINT_RE.test(line) && !/^(workshop ?id\s*:\s*\d+|mod ?id\s*:.*)$/i.test(line)))]
-      .map(line => (line.length > 300 ? `${line.slice(0, 300)}…` : line));
+      .map(clip);
     const links = [...new Set([...description.matchAll(/filedetails\/\?id=(\d+)/g)].map(match => match[1]))].filter(id => id !== item.id);
     // The link text names items that are not in the pack, unless it is just "here" or the like.
     const labels = new Map();
@@ -1610,6 +1755,54 @@
     return { node, refresh, env: o.env };
   }
 
+  function renderServer() {
+    settingNodes = new Map();
+    $('server-unknown').hidden = model.server.settings !== null;
+    $('server-empty').hidden = derived.settings.length > 0;
+    $('server-list').replaceChildren(...derived.settings.map(({ item, loads, asks }) => {
+      const url = workshopUrl(item.id);
+      const title = url
+        ? h('a', { class: 'item-title', href: url, target: '_blank', rel: 'noopener noreferrer', text: itemTitle(item) })
+        : h('span', { class: 'item-title', text: itemTitle(item) });
+      const node = h('div', { class: 'panel', tabindex: '-1' },
+        h('div', { class: 'item-head' }, title, h('span', { class: 'meta', text: loads ? 'its mods load' : "its enabled mods don't load" })),
+        h('ul', { class: 'asks' }, asks.map(ask => askNode(item, ask))));
+      settingNodes.set(item.id, node);
+      return node;
+    }));
+  }
+
+  function askNode(item, ask) {
+    const facts = [];
+    if (ask.key) {
+      const now = serverValue(ask.key);
+      facts.push(`${ask.key}: server ${now === null ? 'unknown' : now === '' ? 'empty' : now}`);
+      if (Object.hasOwn(state.ini, ask.key)) facts.push(`the .env lines set ${said(state.ini[ask.key])}`);
+      if (ask.value !== null) facts.push(`asks for ${said(ask.value)}`);
+    }
+    let bar = null;
+    if (ask.value !== null) {
+      const line = `INI_${ask.key}=${ask.value}`;
+      const added = Object.hasOwn(state.ini, ask.key) && sameValue(state.ini[ask.key], ask.value);
+      const refocus = () => [...settingNodes.get(item.id)?.querySelectorAll('button[data-ini]') || []].find(b => b.dataset.ini === line)?.focus();
+      bar = h('div', { class: 'bar' }, h('code', { text: line }),
+        h('button', {
+          type: 'button', class: 'small', 'data-ini': line, text: added ? 'Remove from .env' : 'Add to .env',
+          'aria-label': added ? `Remove ${line} from the .env lines` : `Add ${line} to the .env lines`,
+          onclick: () => {
+            if (added) delete state.ini[ask.key];
+            else state.ini[ask.key] = ask.value;
+            commit(refocus);
+          },
+        }));
+    }
+    return h('li', { class: ask.problem ? 'ask bad' : 'ask' },
+      h('div', { class: 'ask-line', text: ask.line }),
+      ask.note ? h('div', { class: 'opt-info', text: ask.note }) : null,
+      facts.length ? h('div', { class: 'opt-info' }, facts.join(' · '), ask.problem ? h('span', { class: 'bad', text: ' · differs' }) : null) : null,
+      bar);
+  }
+
   function renderProblems() {
     const p = derived.problems;
     const total = PROBLEM_KINDS.reduce((n, [kind]) => n + p[kind].length, 0);
@@ -1755,7 +1948,8 @@
     itemNodes = new Map();
     orderRows = new Map();
     sandboxSections.clear();
-    for (const id of ['tree', 'order-list', 'band-list', 'map-list', 'sandbox-list', 'problems', 'output']) $(id).replaceChildren();
+    settingNodes = new Map();
+    for (const id of ['tree', 'order-list', 'band-list', 'map-list', 'sandbox-list', 'server-list', 'problems', 'output']) $(id).replaceChildren();
     for (const id of ['paste', 'file', 'env-text']) $(id).value = '';
     $('env-report').textContent = '';
     $('import').open = false;
@@ -1800,6 +1994,14 @@
       state.includeMap = true;
       done.push('INI_Map');
     }
+    // The INI_ settings the workshop pages in the pack ask for.
+    const asked = new Map([...model.items.values()].flatMap(itemAsks).filter(ask => ask.key).map(ask => [envKey(`INI_${ask.key}`), ask.key]));
+    const settings = [];
+    for (const [name, v] of env) {
+      if (!asked.has(name)) continue;
+      state.ini[asked.get(name)] = v;
+      settings.push(asked.get(name));
+    }
     let values = 0;
     let others = 0;
     const options = new Map([...model.options.values()].map(o => [envKey(o.env), o]));
@@ -1813,12 +2015,18 @@
       state.values[o.env] = o.type === 'boolean' ? v.toLowerCase() : v;
       values++;
     }
-    if (values) done.push(plural(values, 'sandbox value'));
     sandboxSections.clear();
     $('include-map').checked = state.includeMap;
     commit();
-    $('env-report').textContent = (done.length ? `Imported ${done.join(', ')}.` : 'Found nothing to import.')
-      + (others ? ` Skipped ${plural(others, 'SANDBOX_ variable')} that none of these mods has; vanilla settings stay as they are in your env file.` : '');
+    // Only the settings of items whose mods are enabled or load go into the .env lines.
+    const kept = settings.filter(key => !derived.settingKeys.includes(key)).length;
+    if (settings.length > kept) done.push(plural(settings.length - kept, 'server setting'));
+    if (values) done.push(plural(values, 'sandbox value'));
+    $('env-report').textContent = [
+      done.length ? `Imported ${done.join(', ')}.` : kept ? '' : 'Found nothing to import.',
+      kept ? `Kept ${plural(kept, 'INI_ setting')} of items whose mods are off; the .env lines get ${kept === 1 ? 'it' : 'them'} once you enable those mods.` : '',
+      others ? `Skipped ${plural(others, 'SANDBOX_ variable')} that none of these mods has; vanilla settings stay as they are in your env file.` : '',
+    ].filter(Boolean).join(' ');
   }
 
   function isFileDrag(e) {
