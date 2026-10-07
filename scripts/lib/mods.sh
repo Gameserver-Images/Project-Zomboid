@@ -2,8 +2,6 @@
 # Workshop items, the mods in them and the maps that enabled mods bring along.
 
 VANILLA_MAP="Muldraugh, KY"
-# The mod of a Java mod framework whose agent moves it to the front of the mod list on players' PCs.
-ZOMBIEBUDDY="ZombieBuddy"
 
 # Reads the mods in the given mods folders the way the game does (ChooseGameInfo, ZomboidFileSystem).
 # Build 41 reads mod.info in the mod folder itself. Build 42 picks the folder with the highest
@@ -283,9 +281,7 @@ mod_dirs() {
 # "load" for the mods the server loads, in load order, "" for the rest. Warns about entries that
 # don't load and why, and about load order hints and conflicts among the mods that load. The server
 # downloads the items SteamCMD couldn't while it starts, so missing mods are only reported once every
-# item in WorkshopItems is there; without a game version that is all it checks. It also warns when
-# ZombieBuddy loads, but not first: players whose ZombieBuddy agent moves it to the front load their
-# Lua files in another order than the server, which kicks them for the Lua checksum.
+# item in WorkshopItems is there; without a game version that is all it checks.
 load_mods() {
   # $1 = INI file, $2 = workshop content dir, $3 = game version ("" when unknown)
   local ini_file="$1" content_dir="$2" version="$3" item check_missing=1
@@ -296,8 +292,7 @@ load_mods() {
   done < <(split_list "$(ini_value "${ini_file}" WorkshopItems)" | awk '!seen[$0]++')
   dirs+=("${HOMEDIR}/Zomboid/mods")
   mod_info_rows "${version}" "${dirs[@]}" \
-    | MODS="$(ini_value "${ini_file}" Mods)" LC_ALL=C awk -F '\t' -v version="${version}" -v check_missing="${check_missing}" \
-      -v zombiebuddy="${ZOMBIEBUDDY}" '
+    | MODS="$(ini_value "${ini_file}" Mods)" LC_ALL=C awk -F '\t' -v version="${version}" -v check_missing="${check_missing}" '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
     function warn(text) { print "Warning: " text > "/dev/stderr" }
     function requires(id, list,   n) { n = split(raw[id], list, ","); return n ? n - 1 : 0 }
@@ -461,11 +456,6 @@ load_mods() {
           conflict[pair] = 1
           warn(mod " and " other " both load, but the mod.info of " mod " says they are incompatible.")
         }
-      }
-      if ((zombiebuddy in loaded) && loaded[zombiebuddy] > 1) {
-        warn("the server loads " zombiebuddy " after " order[1] ", but the " zombiebuddy " agent on players\047 PCs moves it to the front of their mods.\n" \
-          "         Their Lua files then load in another order than the server\047s, so the server kicks them for the Lua checksum (\"File doesn\047t exist on the client\").\n" \
-          "         Put " (b41 ? "" : "\\") zombiebuddy " first in INI_Mods.")
       }
       for (i = 1; i <= loads; i++) {
         r = first[order[i]]

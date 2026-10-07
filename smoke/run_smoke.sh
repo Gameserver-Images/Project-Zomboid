@@ -1076,35 +1076,6 @@ Warning: Mods= has 301\ModX, which the server reads as the mod ID 301ModX; write
   warnings
   [ -s "${WORK}/err" ] && fail "warned about the copy of a mod that the game doesn't use: $(cat "${WORK}/err")"
 
-  # ZombieBuddy has to be the first mod the server loads, also when a mod that requires it brings it in.
-  # The warning names the first mod, not the one before ZombieBuddy.
-  make_mod 401 ZB ZombieBuddy 42
-  printf '%s\n' 'id=ZBUser' 'require=\ZombieBuddy' | mod_file 402/mods/U/42/mod.info
-  set_ini_value "${ini}" WorkshopItems '401;402;202'
-  zb_warning() {
-    # $1 = the mod loaded first, $2 = ZombieBuddy as Mods= should have it
-    printf '%s\n' "Warning: the server loads ZombieBuddy after $1, but the ZombieBuddy agent on players' PCs moves it to the front of their mods." \
-      "         Their Lua files then load in another order than the server's, so the server kicks them for the Lua checksum (\"File doesn't exist on the client\")." \
-      "         Put $2 first in INI_Mods."
-  }
-  for mods in '\ZombieBuddy;\ModB' '\ZBUser;\ModB' '\ZombieBuddy;\ModB;\ZombieBuddy' '\Ghost;\ZombieBuddy' '\ModB;\ZombieBuddy;\ZombieBuddy' '\ModB;\ZBUser' '\ModB;\ModLocal;\ZombieBuddy'; do
-    set_ini_value "${ini}" Mods "${mods}"
-    warnings
-    case "${mods}" in
-      '\ModB;'*) expect_eq "$(cat "${WORK}/err")" "$(zb_warning ModB '\ZombieBuddy')" ;;
-      '\Ghost;'*) expect_eq "$(cat "${WORK}/err")" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.' ;;
-      *) [ -s "${WORK}/err" ] && fail "warned with Mods=${mods}: $(cat "${WORK}/err")" ;;
-    esac
-  done
-  # Without the game version the load order is unknown. Build 41 writes mod IDs without a backslash.
-  version="" warnings
-  [ -s "${WORK}/err" ] && fail "warned about ZombieBuddy without the game version: $(cat "${WORK}/err")"
-  make_mod 403 ZB ZombieBuddy ""
-  set_ini_value "${ini}" WorkshopItems '403'
-  set_ini_value "${ini}" Mods 'ModLocal41;ZombieBuddy'
-  version=41.78.16 warnings
-  expect_eq "$(cat "${WORK}/err")" "$(zb_warning ModLocal41 ZombieBuddy)"
-
   # Build 41 keeps the backslashes in Mods=.
   version=41.78.16
   set_ini_value "${ini}" Mods '\ModLocal41;ModLocal41;\Ghost'
@@ -1721,7 +1692,7 @@ test_vars_documented() {
   done < "${SCRIPT_DIR}/vars.tsv"
   for name in $(grep -rhoE '\$\{[A-Z][A-Z0-9_]+(:-|\+x|\})' "${SCRIPT_DIR}" | grep -oE '[A-Z][A-Z0-9_]+' | sort -u); do
     case "${name}" in
-      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|ZOMBIEBUDDY|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
+      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
     esac
     grep -q "^${name}	" "${SCRIPT_DIR}/vars.tsv" || fail "${name} is read but not in vars.tsv"
   done
@@ -1818,6 +1789,35 @@ test_update_check() {
   # A last line without a newline is kept.
   printf 'last' | follow_output "${WORK}/ready" "${console}" "" > "${WORK}/out"
   expect_eq "$(cat "${WORK}/out")" last
+  # A player whose files fail the game's checksum gets an explanation after the game's line, once per
+  # player and run, for the lines of 42.20 ("in <N>ms"), 42.13 and Build 41 (two "> "). Lines that end
+  # the same but aren't the game's don't count, nor does the anti-cheat line 42.20 adds.
+  kick_hint() {
+    # $1 = player
+    printf '%s\n' "Warning: $1 can't join: their files differ from the server's (other versions of mods, other or changed files, or another load order)." \
+      "         The message on their screen names the first file that differs. \"File doesn't exist on the client\" followed by where that file is on their PC means they have it but load" \
+      "         their mods in another order, which happens when something on their PC reorders mods: ask them what, then put the mods it moves first in INI_Mods, in its order, or have them turn that off."
+  }
+  local kick42='WARN : Multiplayer  f:0 st:17,631,141,550 at ChecksumPacket.parseServer          > user Zexyqag will be kicked in 60000ms because Lua/script checksums do not match'
+  local kick42later='WARN : Multiplayer  f:0 st:17,631,201,550 at ChecksumPacket.parseServer          > user Zexyqag will be kicked in 60000ms because Lua/script checksums do not match'
+  local kick42b='WARN : Multiplayer  f:0 st:17,631,152,004 at ChecksumPacket.parseServer          > user Second will be kicked in 60000ms because Lua/script checksums do not match'
+  local kick4213='LOG  : General      f:0, t:1759800000000, st:1,234,567> user Old Timer will be kicked because Lua/script checksums do not match'
+  local kick41='LOG  : General     , 1759800000000> 1,234,567> user B41 will be kicked because Lua/script checksums do not match'
+  # Build 41 writes the server time in the server's locale, such as de_DE's or fr_FR's (U+202F between the groups).
+  local kick41de='LOG  : General     , 1759800000000> 1.234.567> user B41de will be kicked because Lua/script checksums do not match'
+  local kick41fr="LOG  : General     , 1759800000000> 1"$'\xe2\x80\xaf'"234"$'\xe2\x80\xaf'"567> user B41fr will be kicked because Lua/script checksums do not match"
+  local cheat='WARN : Multiplayer  f:0 st:17,631,141,551 at AntiCheat.log                     > Anti-cheat="ChecksumUpdate" is triggered for connection="Zexyqag" server-option="AntiCheatChecksum" reason="Lua incorrect checksum" counter=1/1 action="Kick" ping=42'
+  local others=('LOG  : General      f:0, t:1759800000000, st:1,234,568> command entered via server console (System.in): "servermsg > user Fake will be kicked because Lua/script checksums do not match"'
+    'LOG  : General      f:0, t:1759800000000, st:1,234,569> Fake said > user Fake will be kicked because Lua/script checksums do not match'
+    'LOG  : General      f:0, t:1759800000000, st:1,234,569> Fake> user Fake will be kicked because Lua/script checksums do not match'
+    'LOG  : General      f:0, t:1759800000000, st:1,234,570> user Fake will be kicked because Lua/script checksums do not match, or not')
+  printf '%s\n' "${cheat}" | follow_output "${WORK}/ready" "${console}" "" > "${WORK}/out"
+  expect_eq "$(cat "${WORK}/out")" "${cheat}"
+  printf '%s\n' "${kick42}" "${cheat}" "${kick42later}" "${kick42b}" "${kick4213}" "${kick41}" "${kick41de}" "${kick41fr}" "${kick42b}" "${others[@]}" \
+    | follow_output "${WORK}/ready" "${console}" "" > "${WORK}/out"
+  expect_eq "$(cat "${WORK}/out")" "$(printf '%s\n' "${kick42}"; kick_hint Zexyqag; printf '%s\n' "${cheat}" "${kick42later}" "${kick42b}"; kick_hint Second
+    printf '%s\n' "${kick4213}"; kick_hint 'Old Timer'; printf '%s\n' "${kick41}"; kick_hint B41; printf '%s\n' "${kick41de}"; kick_hint B41de
+    printf '%s\n' "${kick41fr}"; kick_hint B41fr; printf '%s\n' "${kick42b}" "${others[@]}")"
   # Without a player count the check is due again after the interval.
   : > "${WORK}/console"
   { printf '%s\n' 'LOG  : Network      f:0> *** SERVER STARTED ***' 'LOG  : Mod          f:0> CheckModsNeedUpdate: Mods need update'; sleep 1.5; } \

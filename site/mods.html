@@ -45,8 +45,8 @@
     button { padding: 5px 11px; font-size: 0.9rem; cursor: pointer; }
     button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
     button:disabled { opacity: 0.4; cursor: default; }
-    button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
-    button.primary:hover:not(:disabled) { color: var(--panel); opacity: 0.9; }
+    button.primary, button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+    button.primary:hover:not(:disabled), button[aria-pressed="true"]:hover:not(:disabled) { color: var(--panel); opacity: 0.9; }
     button.small { padding: 0 8px; font-size: 0.8rem; }
     button.link { border: 0; background: none; padding: 0; color: var(--accent); text-align: left; font-size: inherit; overflow-wrap: anywhere; }
     button.link:hover { text-decoration: underline; }
@@ -225,7 +225,7 @@
               <option value="category">Bands by mod category</option>
             </select>
             <button id="sort" type="button" class="primary">Sort</button>
-            <span class="hint">Puts requirements and <code>loadModAfter</code>/<code>loadModBefore</code> first, then follows the band order.</span>
+            <span class="hint">Puts the mods kept first (⇱) at the top, each after what it must load after. For the rest, puts requirements and <code>loadModAfter</code>/<code>loadModBefore</code> first, then follows the band order.</span>
           </div>
           <p id="sort-status" class="hint" role="status"></p>
           <div class="bands">
@@ -280,11 +280,11 @@
 <script>
   'use strict';
   const VANILLA_MAP = 'Muldraugh, KY';
-  // The mod of a Java mod framework whose agent moves it to the front of the mod list on players' PCs.
-  const ZOMBIEBUDDY = 'ZombieBuddy';
   const JSON_KEY = 'pz-mods:json';
   const STATE_KEY = 'pz-mods:state';
   const LOAD_KEY = 'pz-mods:load';
+  // The mod IDs kept first, apart from the state, which loading a list-mods file starts over.
+  const KEEP_KEY = 'pz-mods:keep';
   const TABS = ['pick', 'order', 'maps', 'sandbox', 'server'];
   // INI keys the page writes already: Mods, Map, and WorkshopItems through WORKSHOP_IDS.
   const MANAGED_KEYS = new Set(['mods', 'map', 'workshopitems']);
@@ -304,7 +304,7 @@
     ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
     ['version', () => `Don't load on ${model.gameVersion}`],
     ['order', 'Load order'],
-    ['zombieBuddy', () => `${ZOMBIEBUDDY} not loaded first`, () => `The ${ZOMBIEBUDDY} agent on players' PCs moves it to the front of their mods, so their Lua files load in another order than the server's and the server kicks them for the Lua checksum ("File doesn't exist on the client"). Sort puts it first once Mods= lists it.`],
+    ['kept', 'Kept first, but not at the top', 'Sort puts them back at the top, each after what it must load after.'],
     ['incompatible', 'Incompatible mods'],
     ['setting', 'Server settings the mods ask for', 'Their workshop pages ask for values other than the ones the server has or the .env lines set. Server settings has the INI_ line for each.'],
     ['duplicate', 'Mod IDs in several items'],
@@ -337,6 +337,7 @@
   let mapRows = new Map();
   let settingNodes = new Map();
   let loadId = null;   // ties the saved state to the file it was made for
+  let keep = new Set(); // the mod IDs kept first, for every file
   let dragging = null;
   let searchTimer = null;
   const sandboxSections = new Map();
@@ -1000,9 +1001,17 @@
         p.incompatible.push({ text: `${entry.id} and ${other}`, go });
       }
     });
-    if (loadPos.get(ZOMBIEBUDDY) > 0) {
-      noteOn(ZOMBIEBUDDY, 'bad', `should load first, before ${loaded[0].id}${at(loaded[0].id)}: the ${ZOMBIEBUDDY} agent on players' PCs moves it there`);
-      p.zombieBuddy.push({ text: `${ZOMBIEBUDDY} loads after ${loaded[0].id}`, go: goTo(rowOf.has(ZOMBIEBUDDY) ? ZOMBIEBUDDY : loadedWith.get(ZOMBIEBUDDY)), enable: rowOf.has(ZOMBIEBUDDY) ? null : ZOMBIEBUDDY });
+    // A kept mod may load after what Sort puts at the top with the kept mods, and the mods those bring along.
+    const { edges, rowsOf } = rowGraph(rows, rowOf);
+    const keptBy = keptFirst(rows, edges);
+    let first = null;
+    for (const entry of loaded) {
+      if (!rowsOf(entry.id).some(i => keptBy[i] >= 0)) {
+        first ??= entry;
+      } else if (first && keep.has(entry.id) && rowOf.has(entry.id)) {
+        noteOn(entry.id, 'warn', `kept first, but loads after ${first.id}${at(first.id)}`);
+        p.kept.push({ text: `${entry.id} is kept first but loads at #${rowOf.get(entry.id) + 1}, after ${first.id}`, go: goTo(entry.id) });
+      }
     }
     const used = new Set([...state.mods, ...loadPos.keys()]);
     for (const id of used) {
@@ -1040,7 +1049,7 @@
       return { item, loads, asks };
     });
     const settingKeys = [...new Set(settings.flatMap(({ asks }) => asks.map(ask => ask.key)).filter(Boolean))];
-    derived = { rows, rowOf, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions, settings, settingKeys };
+    derived = { rows, rowOf, edges, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions, settings, settingKeys };
     derived.maps = mapList(loaded);
     derived.output = output();
   }
@@ -1091,20 +1100,61 @@
     return { text: `${lines.join('\n')}\n`, changed, skipped };
   }
 
-  // Stable topological sort over requirements and loadModAfter/loadModBefore, ready mods by (band, position) after
-  // ZombieBuddy. Mods in a cycle keep their current order and are reported.
-  function sortedOrder() {
-    const rows = derived.rows;
-    const n = rows.length;
-    const edges = Array.from({ length: n }, () => new Set());
-    const edge = (from, to) => { if (from !== undefined && to !== undefined && from !== to) edges[from].add(to); };
+  // Sort's graph: for each position in Mods=, the positions that must come after it. A mod that isn't in Mods= loads
+  // with a mod that requires it, directly or through other such mods, so its own requirements and loadModAfter/
+  // loadModBefore order the mods that require it.
+  function rowGraph(rows, rowOf) {
+    const brought = new Map();
     rows.forEach((entry, i) => {
-      if (!entry.inst) return;
-      const pos = id => derived.rowOf.get(id.trim());
-      for (const r of entry.inst.mod.require) edge(pos(r), i);
-      for (const after of entry.inst.mod.loadModAfter) edge(pos(after), i);
-      for (const before of entry.inst.mod.loadModBefore) edge(i, pos(before));
+      const todo = [...entry.inst?.mod.require || []];
+      while (todo.length) {
+        const id = todo.pop().trim();
+        if (rowOf.has(id) || brought.get(id)?.has(i)) continue;
+        brought.set(id, (brought.get(id) || new Set()).add(i));
+        todo.push(...resolve(id).inst?.mod.require || []);
+      }
     });
+    const rowsOf = id => (rowOf.has(id.trim()) ? [rowOf.get(id.trim())] : [...brought.get(id.trim()) || []]);
+    const edges = rows.map(() => new Set());
+    const order = (earlier, later) => {
+      const from = rowsOf(earlier);
+      for (const to of rowsOf(later)) if (!from.includes(to)) for (const v of from) edges[v].add(to);
+    };
+    const mods = [...rows.map(entry => [entry.id, entry.inst?.mod]), ...[...brought.keys()].map(id => [id, resolve(id).inst?.mod])];
+    for (const [id, mod] of mods) {
+      if (!mod) continue;
+      for (const r of mod.require) order(r, id);
+      for (const after of mod.loadModAfter) order(after, id);
+      for (const before of mod.loadModBefore) order(id, before);
+    }
+    return { edges, rowsOf };
+  }
+
+  // For each position in Mods=, the position of the first kept mod that must load after it, directly or not; -1 for
+  // the rest.
+  function keptFirst(rows, edges) {
+    const keptBy = rows.map(() => -1);
+    const sources = rows.map(() => []);
+    edges.forEach((targets, v) => { for (const w of targets) sources[w].push(v); });
+    rows.forEach((entry, k) => {
+      if (!keep.has(entry.id)) return;
+      const todo = [k];
+      while (todo.length) {
+        const v = todo.pop();
+        if (keptBy[v] >= 0) continue;
+        keptBy[v] = k;
+        todo.push(...sources[v]);
+      }
+    });
+    return keptBy;
+  }
+
+  // Stable topological sort over requirements and loadModAfter/loadModBefore. The mods kept first come first, each
+  // after what it must load after, which goes with the first kept mod that needs it; the other ready mods go by (band,
+  // position). Mods in a cycle keep their current order and are reported.
+  function sortedOrder() {
+    const { rows, edges } = derived;
+    const n = rows.length;
 
     const index = new Array(n).fill(-1);
     const low = new Array(n);
@@ -1138,8 +1188,9 @@
     };
     for (let v = 0; v < n; v++) if (index[v] < 0) visit(v);
 
+    const keptBy = keptFirst(rows, edges);
     const rank = new Map(derived.bands.map((band, i) => [band, i]));
-    const priority = components.map(members => Math.min(...members.map(i => (rows[i].id === ZOMBIEBUDDY ? -1 : rank.get(derived.bandOfId.get(rows[i].id)) * (n + 1) + i))));
+    const priority = components.map(members => Math.min(...members.map(i => (keptBy[i] >= 0 ? keptBy[i] - n : rank.get(derived.bandOfId.get(rows[i].id))) * (n + 1) + i)));
     const indegree = new Array(components.length).fill(0);
     const next = components.map(() => new Set());
     for (let v = 0; v < n; v++) {
@@ -1565,8 +1616,17 @@
     });
   }
 
-  function rowButton(action, label, glyph, disabled, run) {
-    return h('button', { type: 'button', 'data-action': action, title: label, 'aria-label': label, disabled, onclick: run }, glyph);
+  // The kept mods as stored, as other tabs change them too. Without storage this tab's stay.
+  function readKeep() {
+    try {
+      keep = new Set(texts(JSON.parse(localStorage.getItem(KEEP_KEY))));
+    } catch {
+      // No storage, or not JSON.
+    }
+  }
+
+  function rowButton(action, label, glyph, disabled, run, pressed) {
+    return h('button', { type: 'button', 'data-action': action, title: label, 'aria-label': label, 'aria-pressed': pressed, disabled, onclick: run }, glyph);
   }
 
   function moveMod(from, insertAt, id, action) {
@@ -1595,6 +1655,14 @@
           rowButton('up', `Move ${id} up`, '↑', i === 0, () => moveMod(i, i - 1, id, 'up')),
           rowButton('down', `Move ${id} down`, '↓', i === n - 1, () => moveMod(i, i + 2, id, 'down')),
           rowButton('top', `Move ${id} to the top of its band`, '⤒', first >= i, () => moveMod(i, first, id, 'top')),
+          rowButton('keep', `Keep ${id} first: Sort keeps it at the top`, '⇱', false, () => {
+            const on = !keep.has(id);
+            readKeep();
+            if (on) keep.add(id);
+            else keep.delete(id);
+            store.set(KEEP_KEY, JSON.stringify([...keep]));
+            commit(() => focusRow(orderRows.get(id), 'keep'));
+          }, String(keep.has(id))),
           rowButton('off', `Disable ${id}`, '✕', false, () => {
             disable(id);
             commit(() => focusRow($('order-list').children[Math.min(i, derived.rows.length - 1)], 'off'));
@@ -1949,6 +2017,8 @@
     store.remove(JSON_KEY);
     store.remove(STATE_KEY);
     store.remove(LOAD_KEY);
+    store.remove(KEEP_KEY);
+    keep = new Set();
     model = state = derived = view = null;
     remembering = false;
     pickRefreshers = [];
@@ -2131,6 +2201,7 @@
     e.dataTransfer.files[0]?.text().then(loadText);
   });
 
+  readKeep();
   restore();
 </script>
 </body>
