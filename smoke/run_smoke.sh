@@ -1076,6 +1076,35 @@ Warning: Mods= has 301\ModX, which the server reads as the mod ID 301ModX; write
   warnings
   [ -s "${WORK}/err" ] && fail "warned about the copy of a mod that the game doesn't use: $(cat "${WORK}/err")"
 
+  # ZombieBuddy has to be the first mod the server loads, also when a mod that requires it brings it in.
+  # The warning names the first mod, not the one before ZombieBuddy.
+  make_mod 401 ZB ZombieBuddy 42
+  printf '%s\n' 'id=ZBUser' 'require=\ZombieBuddy' | mod_file 402/mods/U/42/mod.info
+  set_ini_value "${ini}" WorkshopItems '401;402;202'
+  zb_warning() {
+    # $1 = the mod loaded first, $2 = ZombieBuddy as Mods= should have it
+    printf '%s\n' "Warning: the server loads ZombieBuddy after $1, but the ZombieBuddy agent on players' PCs moves it to the front of their mods." \
+      "         Their Lua files then load in another order than the server's, so the server kicks them for the Lua checksum (\"File doesn't exist on the client\")." \
+      "         Put $2 first in INI_Mods."
+  }
+  for mods in '\ZombieBuddy;\ModB' '\ZBUser;\ModB' '\ZombieBuddy;\ModB;\ZombieBuddy' '\Ghost;\ZombieBuddy' '\ModB;\ZombieBuddy;\ZombieBuddy' '\ModB;\ZBUser' '\ModB;\ModLocal;\ZombieBuddy'; do
+    set_ini_value "${ini}" Mods "${mods}"
+    warnings
+    case "${mods}" in
+      '\ModB;'*) expect_eq "$(cat "${WORK}/err")" "$(zb_warning ModB '\ZombieBuddy')" ;;
+      '\Ghost;'*) expect_eq "$(cat "${WORK}/err")" 'Warning: Mods= enables Ghost, but neither a downloaded workshop item nor Zomboid/mods has it.' ;;
+      *) [ -s "${WORK}/err" ] && fail "warned with Mods=${mods}: $(cat "${WORK}/err")" ;;
+    esac
+  done
+  # Without the game version the load order is unknown. Build 41 writes mod IDs without a backslash.
+  version="" warnings
+  [ -s "${WORK}/err" ] && fail "warned about ZombieBuddy without the game version: $(cat "${WORK}/err")"
+  make_mod 403 ZB ZombieBuddy ""
+  set_ini_value "${ini}" WorkshopItems '403'
+  set_ini_value "${ini}" Mods 'ModLocal41;ZombieBuddy'
+  version=41.78.16 warnings
+  expect_eq "$(cat "${WORK}/err")" "$(zb_warning ModLocal41 ZombieBuddy)"
+
   # Build 41 keeps the backslashes in Mods=.
   version=41.78.16
   set_ini_value "${ini}" Mods '\ModLocal41;ModLocal41;\Ghost'
@@ -1506,6 +1535,184 @@ test_list_env() {
   expect_line "${WORK}/out" "$(printf 'sandbox\tSANDBOX_ZombieLore__Mortality\t5\tDefault = Instant')"
 }
 
+# The issues ci/canary_issues.sh opens from the boot tests' canary results, against a fake gh.
+test_canary_issues() {
+  TEST='canary issues'
+  local dir="${WORK}/canaries" gh="${WORK}/gh" run="https://github.com/owner/repo/actions/runs"
+  mkdir -p "${WORK}/bin" "${gh}"
+  cat > "${WORK}/bin/gh" <<'GH'
+#!/bin/bash
+# Issues in GH_DIR/issues.json, comments in GH_DIR/comments, every call in GH_DIR/calls.
+printf '%s\n' "$*" >> "${GH_DIR}/calls"
+[ -f "${GH_DIR}/issues.json" ] || echo '[]' > "${GH_DIR}/issues.json"
+option() {
+  # $1 = option, then the arguments
+  local name="$1"
+  shift
+  while [ "$#" -gt 1 ]; do
+    [ "$1" = "${name}" ] && { printf '%s' "$2"; return; }
+    shift
+  done
+}
+case "$1 $2" in
+  'issue list')
+    jq --arg state "$(option --state "$@")" --arg fields "$(option --json "$@")" \
+      'map(select($state == "all" or .state == ($state | ascii_upcase)) | with_entries(select(.key as $key | $fields | split(",") | index($key))))' \
+      "${GH_DIR}/issues.json" ;;
+  'issue create')
+    n=$(($(jq length "${GH_DIR}/issues.json") + 1))
+    jq --argjson n "${n}" --arg title "$(option --title "$@")" --rawfile body "$(option --body-file "$@")" \
+      '. + [{number: $n, title: $title, state: "OPEN", body: ($body | rtrimstr("\n")), author: {is_bot: true, login: "app/github-actions"}}]' \
+      "${GH_DIR}/issues.json" > "${GH_DIR}/new"
+    mv "${GH_DIR}/new" "${GH_DIR}/issues.json"
+    echo "https://github.com/owner/repo/issues/${n}" ;;
+  'issue edit')
+    jq --argjson n "$3" --rawfile body "$(option --body-file "$@")" 'map(if .number == $n then .body = ($body | rtrimstr("\n")) else . end)' \
+      "${GH_DIR}/issues.json" > "${GH_DIR}/new"
+    mv "${GH_DIR}/new" "${GH_DIR}/issues.json" ;;
+  'issue comment') { echo "#$3"; cat "$(option --body-file "$@")"; } >> "${GH_DIR}/comments" ;;
+  *) exit 1 ;;
+esac
+GH
+  chmod +x "${WORK}/bin/gh"
+  # $1 = branch, then workaround|result|finding entries
+  results() {
+    local branch="$1" label entry workaround result finding
+    shift
+    case "${branch}" in
+      public) label='42.21.0 stable' ;;
+      legacy41) label='41.78.16 (legacy41 branch)' ;;
+      *) label="${branch}.0 (${branch} branch)" ;;
+    esac
+    mkdir -p "${dir}/canaries-${branch}"
+    for entry in "$@"; do
+      IFS='|' read -r workaround result finding <<< "${entry}"
+      jq -n -c --arg workaround "${workaround}" --arg branch "${branch}" --arg game "${label}" --arg result "${result}" \
+        --arg finding "${finding}" --arg remove "remove ${workaround} and its tests." '{$workaround, $branch, label: $game, $result, $finding, $remove}'
+    done > "${dir}/canaries-${branch}/canaries.jsonl"
+  }
+  # $1 = run ID; BRANCHES can be set for the call
+  run_issues() {
+    GH_DIR="${gh}" PATH="${WORK}/bin:${PATH}" GITHUB_REPOSITORY=owner/repo GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID="$1" \
+      BRANCHES="${BRANCHES- public 42.19  legacy41}" bash "${REPO}/ci/canary_issues.sh" "${dir}" > "${WORK}/out" 2> "${WORK}/err"
+  }
+  issues() {
+    run_issues "$1" || fail "run $1 failed: $(cat "${WORK}/err")"
+    rm -rf "${dir}"
+  }
+  body() { jq -r --argjson n "$1" '.[] | select(.number == $n) | .body' "${gh}/issues.json"; }
+  calls() { cut -d' ' -f1-3 "${gh}/calls" 2>/dev/null | paste -sd ','; }
+
+  # No results, as when no leg got to its canaries: nothing to ask GitHub.
+  issues 1
+  [ -f "${gh}/calls" ] && fail "called gh without results: $(cat "${gh}/calls")"
+  # Without the branches CI tests, the table can't say whether every branch fired.
+  results public 'Zone check|fired|it copes'
+  BRANCHES=' ' run_issues 1 && fail "ran without the branches CI tests"
+  expect_eq "$(cat "${WORK}/err")" 'Error: BRANCHES names no branch'
+  [ -f "${gh}/calls" ] && fail "called gh without the branches CI tests: $(cat "${gh}/calls")"
+  rm -rf "${dir}"
+  # Canaries that hold open nothing.
+  results public 'Zone check|held|it fails' 'File watcher|held|it stops'
+  results legacy41 'Zone check|n/a|other loader'
+  issues 2
+  expect_eq "$(calls)" 'issue list --repo'
+  expect_eq "$(jq length "${gh}/issues.json")" 0
+
+  # The first firing opens an issue with every branch CI tests; the others don't.
+  : > "${gh}/calls"
+  results public 'Zone check|fired|it copes' 'Hidden item filter|held|it stops' 'File watcher|held|it stops'
+  results 42.19 'Zone check|held|it fails' 'Hidden item filter|held|it stops'
+  issues 3
+  expect_eq "$(calls)" 'issue list --repo,issue create --repo'
+  expect_eq "$(jq -r '.[0].title' "${gh}/issues.json")" 'Zone check workaround can be removed'
+  expect_eq "$(body 1)" "The canary of the Zone check workaround in \`ci/boot_test.sh\` reproduces the game bug the workaround is for, with the workaround off. Where it fired, the game no longer has that bug.
+
+| Branch | Game | Canary | Run |
+| --- | --- | --- | --- |
+| public | 42.21.0 stable | fired: it copes | [run](${run}/3) |
+| 42.19 | 42.19.0 (42.19 branch) | still needed: it fails | [run](${run}/3) |
+| legacy41 | | not run since this issue was opened | |
+
+Once it has fired on every branch, the workaround can go. Remove Zone check and its tests.
+
+<!-- canaries {\"42.19\":{\"finding\":\"it fails\",\"label\":\"42.19.0 (42.19 branch)\",\"result\":\"held\",\"run\":\"${run}/3\"},\"public\":{\"finding\":\"it copes\",\"label\":\"42.21.0 stable\",\"result\":\"fired\",\"run\":\"${run}/3\"}} -->"
+  [ -f "${gh}/comments" ] && fail "commented on a new issue: $(cat "${gh}/comments")"
+  grep -qx 'Opening the issue "Zone check workaround can be removed"' "${WORK}/out" || fail "did not say that it opened the issue: $(cat "${WORK}/out")"
+
+  # A later firing updates the table and comments; branches without results keep theirs. With every
+  # branch fired or not applying, the issue says the workaround can go.
+  : > "${gh}/calls"
+  results 42.19 'Zone check|fired|it copes too'
+  results legacy41 'Zone check|n/a|other loader'
+  issues 4
+  expect_eq "$(calls)" 'issue list --repo,issue edit 1,issue comment 1'
+  expect_eq "$(cat "${gh}/comments")" "#1
+Fired on 42.19.0 (42.19 branch): it copes too.
+
+${run}/4"
+  expect_eq "$(body 1 | grep '^| [a-z0-9.]* |')" "| public | 42.21.0 stable | fired: it copes | [run](${run}/3) |
+| 42.19 | 42.19.0 (42.19 branch) | fired: it copes too | [run](${run}/4) |
+| legacy41 | 41.78.16 (legacy41 branch) | does not apply: other loader | [run](${run}/4) |"
+  expect_eq "$(body 1 | grep '^\*\*')" '**It has fired on every branch, so the workaround can go.** Remove Zone check and its tests.'
+  expect_eq "$(jq length "${gh}/issues.json")" 1
+
+  # A re-run of that run changes nothing. A later run where a branch fires again only updates the table.
+  : > "${gh}/calls"
+  rm "${gh}/comments"
+  results 42.19 'Zone check|fired|it copes too'
+  results legacy41 'Zone check|n/a|other loader'
+  issues 4
+  expect_eq "$(calls)" 'issue list --repo'
+  results public 'Zone check|fired|it still copes'
+  issues 5
+  expect_eq "$(calls)" 'issue list --repo,issue list --repo,issue edit 1'
+  [ -f "${gh}/comments" ] && fail "commented on a branch where the canary had fired before: $(cat "${gh}/comments")"
+  expect_eq "$(body 1 | grep '^| public')" "| public | 42.21.0 stable | fired: it still copes | [run](${run}/5) |"
+
+  # A branch where the bug is back: the table changes, without a comment. A run with the same results
+  # leaves the issue alone.
+  : > "${gh}/calls"
+  results public 'Zone check|held|it fails again'
+  issues 6
+  expect_eq "$(calls)" 'issue list --repo,issue edit 1'
+  [ -f "${gh}/comments" ] && fail "commented without a firing: $(cat "${gh}/comments")"
+  expect_eq "$(body 1 | grep '^| public')" "| public | 42.21.0 stable | still needed: it fails again | [run](${run}/6) |"
+  body 1 | grep -q '^Once it has fired on every branch' || fail "said the workaround can go while a branch needs it: $(body 1)"
+  : > "${gh}/calls"
+  results public 'Zone check|held|it fails again'
+  issues 6
+  expect_eq "$(calls)" 'issue list --repo'
+
+  # An issue of this workflow with that title, open or closed, gets the firing, also when its body lost
+  # the table's data; of two, the newer one. One that came back with CRLF line ends keeps its table's
+  # data. A newer one that someone else opened, with data that says every branch fired, stays as it is.
+  local theirs=$'Mine\n\n<!-- canaries {"42.19":{"finding":"x","label":"x","result":"fired","run":"x"},"legacy41":{"finding":"x","label":"x","result":"fired","run":"x"},"public":{"finding":"x","label":"x","result":"fired","run":"x"}} -->'
+  jq --arg theirs "${theirs}" '. + [{number: 2, title: "File watcher workaround can be removed", state: "OPEN", body: "Older", author: {is_bot: true, login: "app/github-actions"}},
+      {number: 3, title: "File watcher workaround can be removed", state: "CLOSED", body: "Closed by hand", author: {is_bot: true, login: "app/github-actions"}},
+      {number: 4, title: "File watcher workaround can be removed", state: "OPEN", body: $theirs, author: {is_bot: false, login: "marty"}}]
+    | map(if .number == 1 then .body |= gsub("\n"; "\r\n") + "\r\n" else . end)' "${gh}/issues.json" > "${gh}/new"
+  mv "${gh}/new" "${gh}/issues.json"
+  : > "${gh}/calls"
+  results legacy41 'File watcher|fired|it starts' 'Zone check|n/a|other loader'
+  results 42.19 'File watcher|held|it stops'
+  issues 7
+  expect_eq "$(calls)" 'issue list --repo,issue edit 3,issue comment 3,issue edit 1'
+  expect_eq "$(body 2)" 'Older'
+  expect_eq "$(body 3 | grep '^| ')" "| Branch | Game | Canary | Run |
+| --- | --- | --- | --- |
+| public | | not run since this issue was opened | |
+| 42.19 | 42.19.0 (42.19 branch) | still needed: it stops | [run](${run}/7) |
+| legacy41 | 41.78.16 (legacy41 branch) | fired: it starts | [run](${run}/7) |"
+  expect_eq "$(body 4)" "${theirs}"
+  expect_eq "$(cat "${gh}/comments")" "#3
+Fired on 41.78.16 (legacy41 branch): it starts.
+
+${run}/7"
+  expect_eq "$(body 1 | tr -d '\r' | grep '^| 42.19')" "| 42.19 | 42.19.0 (42.19 branch) | fired: it copes too | [run](${run}/4) |"
+  expect_eq "$(jq length "${gh}/issues.json")" 4
+}
+
 test_vars_documented() {
   TEST=vars
   local name
@@ -1514,7 +1721,7 @@ test_vars_documented() {
   done < "${SCRIPT_DIR}/vars.tsv"
   for name in $(grep -rhoE '\$\{[A-Z][A-Z0-9_]+(:-|\+x|\})' "${SCRIPT_DIR}" | grep -oE '[A-Z][A-Z0-9_]+' | sort -u); do
     case "${name}" in
-      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
+      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|ZOMBIEBUDDY|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
     esac
     grep -q "^${name}	" "${SCRIPT_DIR}/vars.tsv" || fail "${name} is read but not in vars.tsv"
   done
@@ -1753,7 +1960,7 @@ EOF
   [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "the game was updated with an invalid MOD_UPDATE_CHECK"
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_vars_documented test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_vars_documented test_canary_issues test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

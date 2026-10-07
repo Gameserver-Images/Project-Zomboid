@@ -8,10 +8,13 @@
 # start after adds an item, which SteamCMD downloads next to one the server downloaded itself, and
 # asks the server whether its items have updates and how many players are online. Then,
 # with the host's inotify watch limit below what the game watches with a mod, it
-# checks that the image turns the game's file watcher off, and whether the game still needs that. That
-# limit holds for every user of the host for a few minutes, a desktop's programs included. Writes the
-# env reference for the docs site to <out dir>/<branch>-<build id>.json, with the image version from
-# its org.opencontainers.image.version label.
+# checks that the image turns the game's file watcher off. That limit holds for every user of the host
+# for a few minutes, a desktop's programs included. Writes the env reference for the docs site to
+# <out dir>/<branch>-<build id>.json, with the image version from its org.opencontainers.image.version
+# label.
+# Each workaround of a game bug has a canary here: the bug reproduced with the workaround off. When the
+# game copes, the canary fires, which says that this branch no longer needs the workaround. The results
+# go to <out dir>/canaries.jsonl, from which CI opens an issue once a canary fires.
 # Usage: boot_test.sh <image> <game branch> <out dir>
 
 set -euo pipefail
@@ -29,6 +32,10 @@ if [ -z "${release}" ] || [ "${release}" = "<no value>" ]; then
   echo "Error: ${image} has no org.opencontainers.image.version label" >&2
   exit 1
 fi
+
+mkdir -p "${out_dir}"
+canaries="${out_dir}/canaries.jsonl"
+: > "${canaries}"
 
 fail() {
   echo "Error: $*" >&2
@@ -57,6 +64,18 @@ wait_healthy() {
     sleep 5
   done
   fail "the server did not start within 20 minutes"
+}
+
+canary() {
+  # $1 = workaround, $2 = fired when the game no longer needs it, held when it still does, n/a when it
+  # doesn't apply to this game version, $3 = what the game did, $4 = how to remove the workaround
+  jq -n -c --arg workaround "$1" --arg branch "${branch}" --arg game "${label}" --arg result "$2" --arg finding "$3" \
+    --arg remove "$4" '{$workaround, $branch, label: $game, $result, $finding, $remove}' >> "${canaries}"
+  if [ "$2" = fired ]; then
+    echo "::warning title=$1 workaround::On ${label} $3, so this branch no longer needs the workaround. Once no branch needs it, $4"
+  else
+    echo "$1 workaround: on ${label} $3"
+  fi
 }
 
 stop_server() {
@@ -116,7 +135,6 @@ done
 # Nested sandbox tables are joined with "__", so a key containing "__" could collide with a path.
 duplicates="$(cut -f2 <<< "${rows}" | sort | uniq -d)"
 [ -z "${duplicates}" ] || fail "list-env produced duplicate names: ${duplicates}"
-mkdir -p "${out_dir}"
 jq -R -s --arg label "${label}" --arg release "${release}" '
   split("\n")
   | map(select(length > 0) | split("\t") | {kind: .[0], name: .[1], description: (.[3] // "")})
@@ -171,18 +189,30 @@ docker volume rm -f "${home_volume}" >/dev/null
 docker run --rm -v "${game_volume}:/home/steam/pz-dedicated" --entrypoint bash "${image}" -c 'rm -rf "$1" && mkdir -p "$2"' \
   _ "${workshop}" "${content}/${server_item}"
 mods="${map_mod}"
+map_line="${map};Muldraugh, KY"
 # map_zone_warnings counts the zones the zone loader's Lua code fails on, not those it passes to Java
 # without x and y. This start also finds out whether the game takes those: a mod's regions.lua for the
 # vanilla map has a polygon Region zone, which goes to Java without x and y, and after it a mannequin
 # zone without properties, which the game logs. Build 41 has another zone loader.
+# The zone check's canary is a map of that mod, first in Map=, so the loader reads it last: its
+# objects.lua has a polygon water zone without properties between two mannequin zones without
+# properties, which the game logs, the second one only if the loader gets past the water zone.
+zone_file="${home}/mods/BootZones/common/media/maps/BootZones/objects.lua"
+zone_remove="remove map_zone_warnings and its call in check_maps (scripts/lib/maps.sh), the README bullet on zones the game fails on, its cases in test_map_checks (smoke/run_smoke.sh) and the BootZones mod and its checks in ci/boot_test.sh."
 if [[ "${version}" != 41.* ]]; then
   docker run --rm -v "${home_volume}:${home}" --entrypoint bash "${image}" -c \
-    'mkdir -p "$1/media/maps/Muldraugh, KY" && printf "id=BootZones\n" > "$1/mod.info" \
-      && printf "%s\n" "regions = {" "$2" "$3" "}" > "$1/media/maps/Muldraugh, KY/regions.lua"' \
+    'mkdir -p "$1/media/maps/Muldraugh, KY" "$1/media/maps/BootZones" && printf "id=BootZones\n" > "$1/mod.info" \
+      && printf "%s\n" "regions = {" "$2" "$3" "}" > "$1/media/maps/Muldraugh, KY/regions.lua" \
+      && printf "title=BootZones\n" > "$1/media/maps/BootZones/map.info" \
+      && printf "%s\n" "objects = {" "$4" "$5" "$6" "}" > "$1/media/maps/BootZones/objects.lua"' \
     _ "${home}/mods/BootZones/common" \
     '{ name = "", type = "Region", z = 0, geometry = "polygon", points = { 10,10, 20,10, 20,20 } },' \
-    '{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 1, height = 1 },'
+    '{ name = "", type = "Mannequin", x = 1, y = 1, z = 0, width = 1, height = 1 },' \
+    '{ name = "", type = "Mannequin", x = 3, y = 3, z = 0, width = 1, height = 1 },' \
+    '{ name = "", type = "WaterZone", z = 0, geometry = "polygon", points = { 10,10, 20,10, 20,20 } },' \
+    '{ name = "", type = "Mannequin", x = 4, y = 4, z = 0, width = 1, height = 1 },'
   mods="BootZones;${map_mod}"
+  map_line="BootZones;${map_line}"
 fi
 docker run -d --name "${name}" --health-interval=5s \
   -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
@@ -202,16 +232,40 @@ grep -qE "loading ${map_mod}\$" <<< "${logs}" || map_failed "the server did not 
 if problems="$(grep -E "^Warning: Mods= .*${map_mod}|skipping non-existent map folder .*${map}" <<< "${logs}")"; then
   map_failed "the map mod did not load as it should: ${problems}"
 fi
-docker exec "${name}" grep -qx "Map=${map};Muldraugh, KY" "${home}/Server/pzserver.ini" \
-  || map_failed "after the first start Map= is not ${map};Muldraugh, KY but $(docker exec "${name}" grep '^Map=' "${home}/Server/pzserver.ini")"
+docker exec "${name}" grep -qx "Map=${map_line}" "${home}/Server/pzserver.ini" \
+  || map_failed "after the first start Map= is not ${map_line} but $(docker exec "${name}" grep '^Map=' "${home}/Server/pzserver.ini")"
 docker exec "${name}" grep -qF "{ name = \"${map}\", file = \"media/maps/${map}/spawnpoints.lua\" }," "${home}/Server/pzserver_spawnregions.lua" \
   || map_failed "after the first start pzserver_spawnregions.lua has no spawn region for ${map}"
 if [[ "${version}" != 41.* ]]; then
+  region_taken=false
   if grep -q 'Mannequin zone missing properties in media/maps/Muldraugh, KY/regions.lua' <<< "${logs}"; then
+    region_taken=true
     echo "The game's map zone loader takes a zone that goes to Java without x and y"
   else
     echo "::warning title=Zone check::On ${label} a zone that goes to Java without x and y stops the game's map zone loading, so map_zone_warnings misses those zones and should count them too."
   fi
+  zone_logged() {
+    # $1 = the mannequin zone's x and y; the game logs "coords: 3, 3, 0" since 42.16, "at 3,3,0" before
+    grep -qE "Mannequin zone missing properties in media/maps/BootZones/objects\.lua (coords: $1(\.0)?, |at $1(\.0)?,)" <<< "${logs}"
+  }
+  zone_lines="$(grep -E ' media/maps/BootZones/objects\.lua|handleWaterZone' <<< "${logs}" || true)"
+  zone_warned=false
+  grep -qF "Warning: the game fails on the zone at ${zone_file}:3 and stops loading map zones there" <<< "${logs}" && zone_warned=true
+  if ! zone_logged 3; then
+    [ "${region_taken}" = false ] \
+      || fail "the game's map zone loader, which reads the maps from the last in Map= to the first, did not get to media/maps/BootZones/objects.lua, so the zone check's canary tested nothing. The log's lines for that file: ${zone_lines:-none}"
+    canary "Zone check" held "the game's map zone loader stops loading map zones at a zone that goes to Java without x and y in media/maps/Muldraugh, KY/regions.lua, before it gets to the polygon water zone" "${zone_remove}"
+  elif zone_logged 4; then
+    canary "Zone check" fired "the game's map zone loader takes a polygon water zone without properties and loads the zones after it$([ "${zone_warned}" = false ] || echo ", although the image still warned about it")" "${zone_remove}"
+  elif grep -q 'handleWaterZone' <<< "${logs}"; then
+    [ "${zone_warned}" = true ] \
+      || fail "the game failed in handleWaterZone on the polygon water zone at media/maps/BootZones/objects.lua:3 and stopped loading map zones there, but the image did not warn about that zone. Its zone warnings: $(grep -A 3 '^Warning: the game fails on the zone' <<< "${logs}" || echo none)"
+    canary "Zone check" held "the game's map zone loader still fails on a polygon water zone without properties in handleWaterZone" "${zone_remove}"
+  else
+    fail "the game's map zone loader stopped at the polygon water zone in media/maps/BootZones/objects.lua without failing in handleWaterZone. The log's lines for that file: ${zone_lines}"
+  fi
+else
+  canary "Zone check" n/a "the game has another map zone loader, which the zone check leaves alone" "${zone_remove}"
 fi
 stop_server 1
 
@@ -244,6 +298,41 @@ grep -qE "${answer}" <<< "${logs}" \
 grep -qE '> Players connected \(0\):' <<< "${logs}" \
   || fail "the server did not answer players as MOD_UPDATE_CHECK expects: $(grep 'Players connected' <<< "${logs}")"
 stop_server 1
+docker rm -f "${name}" >/dev/null
+
+# The hidden item filter's canary: the start before with one more item, which Steam answers with
+# result 9, set with INI_WorkshopItems, which the image leaves as it is. The game stops when an item
+# fails to install (GameServerWorkshopItems), on Build 42 with a NullPointerException.
+# An ID Steam never issued: it answers 9 like a hidden item, and nobody can make it public again.
+hidden_item=99999999999
+hidden_remove="remove the result-9 branch of apply_workshop_ids (scripts/lib/mods.sh) and its warnings, the README sentence on items that are removed, hidden or private, its cases in test_workshop (smoke/run_smoke.sh) and this canary in ci/boot_test.sh."
+hidden_result="$(curl -fsS --retry 3 --retry-all-errors --max-time 30 -X POST -d itemcount=1 -d "publishedfileids[0]=${hidden_item}" \
+  https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/ | jq -r '.response.publishedfiledetails[0].result')" \
+  || fail "could not look up workshop item ${hidden_item} with Steam's API"
+[ "${hidden_result}" = 9 ] \
+  || fail "Steam's API answers result ${hidden_result} for workshop item ${hidden_item}, not 9 (removed, hidden or private), so the image would not leave it out; the hidden item filter's canary needs an ID it answers with 9"
+docker run -d --name "${name}" --health-interval=5s \
+  -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" -e GAME_UPDATE=false \
+  -e INI_WorkshopItems="${server_item};${map_item};${new_item};${hidden_item}" -e INI_Mods="${mods}" "${image}" >/dev/null
+if wait_healthy; then
+  logs="$(docker logs "${name}" 2>&1)"
+  grep -qE "Workshop: .*ID=${hidden_item}( |\$)" <<< "${logs}" \
+    || fail "the server started with workshop item ${hidden_item} in WorkshopItems, but its log doesn't show that it tried to install it"
+  canary "Hidden item filter" fired "the server starts with workshop item ${hidden_item} in WorkshopItems, which Steam answers with result 9" "${hidden_remove}"
+  stop_server 1
+else
+  logs="$(docker logs "${name}" 2>&1)"
+  hidden_lines="$(grep -E "Workshop: (.*ID=${hidden_item}( |\$)|${hidden_item} )" <<< "${logs}" || echo none)"
+  grep -qE "Workshop: item state [A-Za-z]+ -> Fail ID=${hidden_item}\$" <<< "${logs}" \
+    || fail "with workshop item ${hidden_item} in WorkshopItems the server exited before it started, but its log doesn't show that the item failed to install. The log's lines for the item: ${hidden_lines}"
+  grep -q "Workshop: ${hidden_item} installed to " <<< "${logs}" \
+    && fail "with workshop item ${hidden_item} in WorkshopItems the server exited before it started, but after it had installed its workshop items, that one included. The log's lines for the item: ${hidden_lines}"
+  hidden_finding="the server still stops when a workshop item that Steam answers with result 9 fails to install"
+  grep -q "Workshop: onItemNotDownloaded itemID=${hidden_item} result=9\$" <<< "${logs}" \
+    && hidden_finding+=": its download ended with result 9"
+  grep -q 'NullPointerException' <<< "${logs}" && hidden_finding+=", followed by a NullPointerException"
+  canary "Hidden item filter" held "${hidden_finding}" "${hidden_remove}"
+fi
 docker rm -f "${name}" >/dev/null
 
 # The game stops when it runs out of inotify watches in its media folder or in a mod folder. With a
@@ -279,15 +368,17 @@ grep -q "file watcher is off for this start" <<< "$(docker logs "${name}" 2>&1)"
   || fail "the image did not say that it turned the game's file watcher off with ${low_limit} inotify watches"
 stop_server 1
 
+# The file watcher workaround's canary
+watcher_remove="remove shim/ and its rule in .gitignore, its paths in .github/workflows/docker-image.yml, the Dockerfile's shim stage and its COPY --from=shim line, scripts/lib/watcher.sh and its call in scripts/configure.sh, GAME_FILE_WATCHER in scripts/vars.tsv, the README paragraph on inotify watches, test_file_watcher (smoke/run_smoke.sh) and the low-limit starts in ci/boot_test.sh."
 start_low_limit -e GAME_FILE_WATCHER=true
 if wait_healthy; then
-  echo "::warning title=File watcher workaround::On ${label} the game no longer stops when it runs out of inotify watches, so once every game version the image supports does the same, GAME_FILE_WATCHER and shim/ can be removed."
+  canary "File watcher" fired "the game no longer stops when it runs out of inotify watches" "${watcher_remove}"
   stop_server 1
 else
   logs="$(docker logs "${name}" 2>&1)"
   grep -q "User limit of inotify watches reached" <<< "${logs}" && grep -q "Server Terminated" <<< "${logs}" \
     || fail "with the file watcher on, the server exited before it started, but not because it ran out of inotify watches"
-  echo "With the file watcher on, the game still stops when it runs out of inotify watches"
+  canary "File watcher" held "the game still stops when it runs out of inotify watches" "${watcher_remove}"
 fi
 sudo sysctl -q -w "fs.inotify.max_user_watches=${watch_limit}"
 watch_limit=""

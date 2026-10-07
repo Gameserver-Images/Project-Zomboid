@@ -280,6 +280,8 @@
 <script>
   'use strict';
   const VANILLA_MAP = 'Muldraugh, KY';
+  // The mod of a Java mod framework whose agent moves it to the front of the mod list on players' PCs.
+  const ZOMBIEBUDDY = 'ZombieBuddy';
   const JSON_KEY = 'pz-mods:json';
   const STATE_KEY = 'pz-mods:state';
   const LOAD_KEY = 'pz-mods:load';
@@ -302,6 +304,7 @@
     ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
     ['version', () => `Don't load on ${model.gameVersion}`],
     ['order', 'Load order'],
+    ['zombieBuddy', () => `${ZOMBIEBUDDY} not loaded first`, () => `The ${ZOMBIEBUDDY} agent on players' PCs moves it to the front of their mods, so their Lua files load in another order than the server's and the server kicks them for the Lua checksum ("File doesn't exist on the client"). Sort puts it first once Mods= lists it.`],
     ['incompatible', 'Incompatible mods'],
     ['setting', 'Server settings the mods ask for', 'Their workshop pages ask for values other than the ones the server has or the .env lines set. Server settings has the INI_ line for each.'],
     ['duplicate', 'Mod IDs in several items'],
@@ -997,6 +1000,10 @@
         p.incompatible.push({ text: `${entry.id} and ${other}`, go });
       }
     });
+    if (loadPos.get(ZOMBIEBUDDY) > 0) {
+      noteOn(ZOMBIEBUDDY, 'bad', `should load first, before ${loaded[0].id}${at(loaded[0].id)}: the ${ZOMBIEBUDDY} agent on players' PCs moves it there`);
+      p.zombieBuddy.push({ text: `${ZOMBIEBUDDY} loads after ${loaded[0].id}`, go: goTo(rowOf.has(ZOMBIEBUDDY) ? ZOMBIEBUDDY : loadedWith.get(ZOMBIEBUDDY)), enable: rowOf.has(ZOMBIEBUDDY) ? null : ZOMBIEBUDDY });
+    }
     const used = new Set([...state.mods, ...loadPos.keys()]);
     for (const id of used) {
       const { copies, item } = resolve(id);
@@ -1084,8 +1091,8 @@
     return { text: `${lines.join('\n')}\n`, changed, skipped };
   }
 
-  // Stable topological sort over requirements and loadModAfter/loadModBefore, ready mods by (band, position).
-  // Mods in a cycle keep their current order and are reported.
+  // Stable topological sort over requirements and loadModAfter/loadModBefore, ready mods by (band, position) after
+  // ZombieBuddy. Mods in a cycle keep their current order and are reported.
   function sortedOrder() {
     const rows = derived.rows;
     const n = rows.length;
@@ -1132,7 +1139,7 @@
     for (let v = 0; v < n; v++) if (index[v] < 0) visit(v);
 
     const rank = new Map(derived.bands.map((band, i) => [band, i]));
-    const priority = components.map(members => Math.min(...members.map(i => rank.get(derived.bandOfId.get(rows[i].id)) * (n + 1) + i)));
+    const priority = components.map(members => Math.min(...members.map(i => (rows[i].id === ZOMBIEBUDDY ? -1 : rank.get(derived.bandOfId.get(rows[i].id)) * (n + 1) + i))));
     const indegree = new Array(components.length).fill(0);
     const next = components.map(() => new Set());
     for (let v = 0; v < n; v++) {

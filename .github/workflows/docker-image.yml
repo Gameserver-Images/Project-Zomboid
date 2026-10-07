@@ -4,7 +4,8 @@ name: Build and Publish Docker Image
 # (ci/next_release.sh) builds the image, boots it on every Steam branch of the game and publishes it
 # under that version once it boots on the stable game. The image holds no game, so every hour the
 # newest release is booted on each branch whose Steam build is new to it. Every boot test that
-# passes adds the env reference for its game build to the docs site.
+# passes adds the env reference for its game build to the docs site, and a boot test whose canary
+# says that the game no longer needs a workaround opens or updates an issue for it.
 on:
   push:
     branches:
@@ -63,6 +64,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       has_tests: ${{ steps.plan.outputs.has_tests }}
+      branches: ${{ steps.plan.outputs.branches }}
       release: ${{ steps.plan.outputs.release }}
       publish: ${{ steps.plan.outputs.publish }}
       notes: ${{ steps.plan.outputs.notes }}
@@ -119,6 +121,7 @@ jobs:
           {
             echo "matrix=$(printf '%s\n' "${tests[@]}" | jq -s -c .)"
             echo "has_tests=$([ "${#tests[@]}" -gt 0 ] && echo true || echo false)"
+            echo "branches=$(cut -d' ' -f1 <<< "${branches}" | paste -sd ' ')"
             echo "release=${release}"
             echo "publish=$([ -n "${version}" ] && echo true || echo false)"
             if [ -n "${version}" ]; then
@@ -227,6 +230,17 @@ jobs:
           path: out/*.json
           if-no-files-found: error
 
+      # A canary's result holds even when a later part of the boot test fails. Last, so that a failed
+      # upload doesn't hold back the release.
+      - name: Upload canary results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: canaries-${{ matrix.branch }}
+          path: out/canaries.jsonl
+          if-no-files-found: ignore
+          overwrite: true
+
   # References only exist for boot tests that passed, so a failed branch leaves the site as it was.
   pages:
     needs: [test, prepare, build]
@@ -273,6 +287,35 @@ jobs:
         uses: actions/deploy-pages@v5
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
+
+  # Runs that test the real game on main turn fired canaries into issues.
+  canaries:
+    needs: [prepare, build]
+    if: >-
+      always() && github.ref == 'refs/heads/main'
+      && needs.prepare.outputs.has_tests == 'true' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: canaries
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Download canary results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: canaries-*
+          path: canaries
+
+      - name: Open or update issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCHES: ${{ needs.prepare.outputs.branches }}
+        run: bash ci/canary_issues.sh canaries
 
   # GitHub turns off the schedule of a public repository after 60 days without activity, and
   # enabling the workflow counts as activity.
