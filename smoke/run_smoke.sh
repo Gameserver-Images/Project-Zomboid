@@ -872,7 +872,7 @@ for ((i = 1; i <= $#; i++)); do
     https://api.steampowered.com/*) exec "$(dirname "$0")/../bin/curl" "$@" ;;
     -o) i=$((i + 1)); out="${!i}" ;;
     -w) i=$((i + 1)); format="${!i}" ;;
-    -F | --data-binary) i=$((i + 1)); [[ "${!i}" == *@* ]] && upload="${!i#*@}" ;;
+    --data-binary) i=$((i + 1)); [[ "${!i}" == *@* ]] && upload="${!i#*@}" ;;
     --location* | -L* | -[!-]*L*) echo "curl: redirects must not be followed" >&2; exit 99 ;;
     -*) ;;
     https://*) url="${arg}" ;;
@@ -886,7 +886,6 @@ if [ "${FAKE_PASTE:-}" = down ]; then
   exit 28
 fi
 case "${url}" in
-  https://litterbox.catbox.moe/resources/internals/api.php) status=200 answer='https://litter.catbox.moe/ab12cd.gz' ;;
   https://api.pastes.dev/post | https://bytebin.example.com:8443/paste/post) status=201 answer='{"key":"Ab12Cd"}' ;;
   *) echo "curl: (6) Could not resolve host: ${url}" >&2; exit 6 ;;
 esac
@@ -973,14 +972,7 @@ EOF
   [ -f "${HOMEDIR}/paste-calls" ] && fail "plain list-mods uploaded"
 
   list_mods --upload
-  expect_request '[https://litterbox.catbox.moe/resources/internals/api.php]' '[-F] [reqtype=fileupload]' '[-F] [time=1h]'
-  [[ "${args}" == *'[-F] [fileToUpload=@'*'/mods.json.gz] '* ]] || fail "litterbox got no mods.json.gz: ${args}"
-  [[ "${args}" == *'[-H]'* || "${args}" == *'[--data-binary]'* ]] && fail "litterbox got bytebin's headers or body: ${args}"
-  expect_uploaded 'litterbox.catbox.moe, which deletes it after 1 hour' https://litter.catbox.moe/ab12cd.gz
-
-  list_mods --upload pastes.dev
   expect_request '[https://api.pastes.dev/post]' '[-H] [Content-Type: application/json]' '[-H] [Content-Encoding: gzip]' '[--data-binary] [@'
-  [[ "${args}" == *'[--data-binary] [@'*'/mods.json.gz] '* ]] || fail "pastes.dev got no mods.json.gz: ${args}"
   [[ "${args}" == *'[-F]'* ]] && fail "pastes.dev got a form: ${args}"
   expect_uploaded "pastes.dev, which keeps it for good; nobody can delete it" https://api.pastes.dev/Ab12Cd
 
@@ -990,47 +982,43 @@ EOF
     expect_request "[${own}/post]" '[-H] [Content-Type: application/json]' '[-H] [Content-Encoding: gzip]' '[--data-binary] [@'
     expect_uploaded 'bytebin.example.com:8443, whose settings decide when it is deleted' "${own}/Ab12Cd"
   done
+  # Any 2xx is a success, such as a 200 from a proxy in front of your own bytebin.
+  FAKE_PASTE_STATUS=200 FAKE_PASTE_ANSWER='{"key":"Ab12Cd"}' list_mods --upload "${own}"
+  expect_uploaded 'bytebin.example.com:8443, whose settings decide when it is deleted' "${own}/Ab12Cd"
 
   # Failures name the host and why, are not retried and print nothing on stdout. What the host answers
   # stays on one line without control characters.
   FAKE_PASTE=down list_mods --upload
-  expect_upload_error 'litterbox.catbox.moe: Connection timed out after 15001 milliseconds'
-  FAKE_PASTE_STATUS=413 FAKE_PASTE_ANSWER='Content too large\n\033[31mtry less ' list_mods --upload pastes.dev
+  expect_upload_error 'pastes.dev: Connection timed out after 15001 milliseconds'
+  FAKE_PASTE_STATUS=413 FAKE_PASTE_ANSWER='Content too large\n\033[31mtry less ' list_mods --upload
   expect_upload_error 'pastes.dev: HTTP 413: Content too large [31mtry less'
   FAKE_PASTE_STATUS=502 FAKE_PASTE_ANSWER='' list_mods --upload "${own}"
   expect_upload_error 'bytebin.example.com:8443: HTTP 502'
-  FAKE_PASTE_STATUS=302 FAKE_PASTE_ANSWER='https://litter.catbox.moe/ab12cd.gz' list_mods --upload
-  expect_upload_error 'litterbox.catbox.moe: HTTP 302: https://litter.catbox.moe/ab12cd.gz'
+  FAKE_PASTE_STATUS=302 FAKE_PASTE_ANSWER='{"key":"Ab12Cd"}' list_mods --upload
+  expect_upload_error 'pastes.dev: HTTP 302: {"key":"Ab12Cd"}'
   FAKE_PASTE_STATUS=500 FAKE_PASTE_ANSWER="$(printf '%0300d' 0)" list_mods --upload
-  expect_upload_error "litterbox.catbox.moe: HTTP 500: $(printf '%0200d' 0)"
-  for answer in 'https://litter.catbox.moe/ab12cd.txt' 'http://litter.catbox.moe/ab12cd.gz' 'https://litter.catbox.moe.example.com/ab12cd.gz' \
-    'https://litterxcatbox.moe/ab12cd.gz' 'https://litter.catbox.moe/ab12cdxgz' 'https://litter.catbox.moe/ab-cd.gz' \
-    'https://litter.catbox.moe/ab12cd.gz\nhttps://example.com/x.gz' 'https://litter.catbox.moe/ab\0cd.gz' ' https://litter.catbox.moe/ab12cd.gz' \
-    'https://litter.catboxxmoe/ab12cd.gz' 'https://litter.catbox.moe/ab.cd.gz' 'https://litter.catbox.moe/a/b.gz' '' 'No file uploaded'; do
-    FAKE_PASTE_STATUS=200 FAKE_PASTE_ANSWER="${answer}" list_mods --upload
-    expect_upload_error "litterbox.catbox.moe: unexpected answer \"$(printf '%b' "${answer}" | tr '\0\n' '  ' | sed 's/^ //')\""
-  done
+  expect_upload_error "pastes.dev: HTTP 500: $(printf '%0200d' 0)"
   for answer in 'not json' '{"key":"../x"}' '{"key":123}' '{"key":"Ab\\u0000Cd"}' '{"key":"Ab12Cd\\n"}' '{"key":"a"}{"key":"b"}' \
-    '[{"key":"Ab12Cd"}]' '{"Key":"Ab12Cd"}' 'https://api.pastes.dev/Ab12Cd'; do
-    FAKE_PASTE_STATUS=201 FAKE_PASTE_ANSWER="${answer}" list_mods --upload pastes.dev
-    expect_upload_error "pastes.dev: unexpected answer \"$(printf '%b' "${answer}")\""
+    '[{"key":"Ab12Cd"}]' '{"Key":"Ab12Cd"}' 'https://api.pastes.dev/Ab12Cd' '{"key":"Ab\0Cd"}' '{"key":"Ab12Cd"}\n{"key":"x"}' '' ' not json'; do
+    FAKE_PASTE_STATUS=201 FAKE_PASTE_ANSWER="${answer}" list_mods --upload
+    expect_upload_error "pastes.dev: unexpected answer \"$(printf '%b' "${answer}" | tr '\0\n' '  ' | sed 's/^ //')\""
   done
 
   # Wrong arguments stop list-mods before it does anything.
-  for target in catbox litterbox PASTES.DEV pastes.dev.example.com '' http://bytebin.example.com http://example.com/https://bytebin.example.com \
+  for target in pastes.dev litterbox catbox PASTES.DEV pastes.dev.example.com '' http://bytebin.example.com http://example.com/https://bytebin.example.com \
     https://user:pass@bytebin.example.com https://user@bytebin.example.com 'https://bytebin.example.com/a b' 'https://bytebin.example.com/?x=1' \
     'https://bytebin.example.com/#x' https:// 'https://bytebin.example.com//' https://bytebin.example.com:x 'https://bytebin.example.com:/paste'; do
     list_mods --upload "${target}"
     expect_eq "${code}" 2
-    expect_eq "$(cat "${err}")" 'Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]'
+    expect_eq "$(cat "${err}")" 'Usage: list-mods [--upload [https://<your bytebin>]]'
     [ -s "${out}" ] && fail "list-mods --upload '${target}' printed $(cat "${out}")"
     [ -f "${HOMEDIR}/steam-calls" ] || [ -f "${HOMEDIR}/paste-calls" ] && fail "list-mods --upload '${target}' ran"
   done
-  for arguments in '--upload pastes.dev extra' '--upload --upload' '--pastes' 'pastes.dev' '-u' '--upload=pastes.dev'; do
+  for arguments in '--upload https://bytebin.example.com extra' '--upload --upload' '--pastes' 'pastes.dev' '-u' '--upload=pastes.dev'; do
     read -ra words <<< "${arguments}"
     list_mods "${words[@]}"
     expect_eq "${code}" 2
-    expect_eq "$(cat "${err}")" 'Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]'
+    expect_eq "$(cat "${err}")" 'Usage: list-mods [--upload [https://<your bytebin>]]'
     [ -s "${out}" ] && fail "list-mods ${arguments} printed $(cat "${out}")"
     [ -f "${HOMEDIR}/steam-calls" ] || [ -f "${HOMEDIR}/paste-calls" ] && fail "list-mods ${arguments} ran"
   done

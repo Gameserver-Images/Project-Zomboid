@@ -4,9 +4,9 @@
 # mod's requirements, maps and sandbox options for the version of the installed game, and the few server
 # INI settings the mods page uses. The values of passwords, tokens, webhooks, Discord and RCON settings and
 # the announced IP stay out, mods' sandbox options included.
-# --upload sends it gzipped to litterbox.catbox.moe, which deletes it after an hour, to pastes.dev,
-# which keeps it for good, or to the bytebin server at that URL, and prints a mods page link that loads it.
-# Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]
+# --upload sends it gzipped to pastes.dev, which keeps it for good, or to the bytebin server at that URL,
+# and prints a mods page link that loads it.
+# Usage: list-mods [--upload [https://<your bytebin>]]
 
 set -euo pipefail
 shopt -s nullglob
@@ -15,25 +15,20 @@ mods_page='https://gameserver-images.github.io/Project-Zomboid/mods.html'
 user_agent='project-zomboid-list-mods (github.com/Gameserver-Images/Project-Zomboid)'
 
 usage() {
-  echo 'Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]' >&2
+  echo 'Usage: list-mods [--upload [https://<your bytebin>]]' >&2
   exit 2
 }
 
 # https without user info, in characters the mods page link needs no escaping for.
 bytebin_url='^https://([A-Za-z0-9.-]+(:[0-9]+)?)(/[A-Za-z0-9._~-]+)*/?$'
-upload=""
+base=""
 case "$#:${1:-}" in
   0:) ;;
   1:--upload)
-    upload=litterbox host=litterbox.catbox.moe deleted='which deletes it after 1 hour' ;;
+    base=https://api.pastes.dev host=pastes.dev deleted='which keeps it for good; nobody can delete it' ;;
   2:--upload)
-    if [ "$2" = pastes.dev ]; then
-      upload=bytebin base=https://api.pastes.dev host=pastes.dev deleted="which keeps it for good; nobody can delete it"
-    elif [[ "$2" =~ ${bytebin_url} ]]; then
-      upload=bytebin base="${2%/}" host="${BASH_REMATCH[1]}" deleted='whose settings decide when it is deleted'
-    else
-      usage
-    fi ;;
+    [[ "$2" =~ ${bytebin_url} ]] || usage
+    base="${2%/}" host="${BASH_REMATCH[1]}" deleted='whose settings decide when it is deleted' ;;
   *) usage ;;
 esac
 
@@ -325,7 +320,7 @@ jq -n -c \
     }
 ' > "${tmp}/mods.json"
 
-if [ -z "${upload}" ]; then
+if [ -z "${base}" ]; then
   cat "${tmp}/mods.json"
   exit 0
 fi
@@ -336,33 +331,21 @@ upload_error() {
 }
 
 gzip -9 < "${tmp}/mods.json" > "${tmp}/mods.json.gz"
-# Litterbox keeps the file name's extension. Bytebin serves the file with the Content-Encoding it got, so
-# browsers decompress it.
-if [ "${upload}" = litterbox ]; then
-  request=(-F reqtype=fileupload -F time=1h -F "fileToUpload=@${tmp}/mods.json.gz" https://litterbox.catbox.moe/resources/internals/api.php)
-else
-  request=(-H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary "@${tmp}/mods.json.gz" "${base}/post")
-fi
 : > "${tmp}/answer"
+# Bytebin serves the file with the Content-Encoding it got, so browsers decompress it.
 if ! status="$(curl -sS --connect-timeout 15 --max-time 120 -A "${user_agent}" -o "${tmp}/answer" -w '%{http_code}' \
-  "${request[@]}" 2> "${tmp}/curl-error")"; then
+  -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary "@${tmp}/mods.json.gz" "${base}/post" \
+  2> "${tmp}/curl-error")"; then
   upload_error "$(head -n 1 "${tmp}/curl-error" | sed 's/^curl: ([0-9]*) //')"
 fi
 # The start of the answer for messages, on one line and without control characters.
 answer="$(head -c 200 "${tmp}/answer" | LC_ALL=C tr -c '[:print:]' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
 [[ "${status}" == 2[0-9][0-9] ]] || upload_error "HTTP ${status}${answer:+: ${answer}}"
 
-url=""
-if [ "${upload}" = litterbox ]; then
-  # Bash would drop NUL bytes.
-  link="$(tr '\0' '\n' < "${tmp}/answer")"
-  if [[ "${link}" =~ ^https://litter\.catbox\.moe/[A-Za-z0-9]+\.gz$ ]]; then
-    url="${link}"
-  fi
-elif key="$(jq -c .key "${tmp}/answer" 2> /dev/null)" && [[ "${key}" =~ ^\"([A-Za-z0-9]+)\"$ ]]; then
-  url="${base}/${BASH_REMATCH[1]}"
+if ! key="$(jq -c .key "${tmp}/answer" 2> /dev/null)" || ! [[ "${key}" =~ ^\"([A-Za-z0-9]+)\"$ ]]; then
+  upload_error "unexpected answer \"${answer}\""
 fi
-[ -n "${url}" ] || upload_error "unexpected answer \"${answer}\""
+url="${base}/${BASH_REMATCH[1]}"
 
 echo "Uploaded to ${host}, ${deleted}. Open this link to load it on the mods page:"
 echo "${mods_page}#url=${url}"

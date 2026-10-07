@@ -175,7 +175,7 @@
       In Portainer, run <code>list-mods --upload</code> in the container's console instead and open the link it prints. The link's host sees who downloads the file.</p>
     <p id="load-note" class="muted" hidden>Loading a file starts over from that server's settings.</p>
     <div class="bar">
-      <input id="file" type="file" accept=".json,.gz,application/json,application/gzip" aria-label="list-mods JSON file">
+      <input id="file" type="file" accept=".json,application/json" aria-label="list-mods JSON file">
     </div>
     <textarea id="paste" rows="4" placeholder="Or paste the JSON here" aria-label="list-mods JSON"></textarea>
     <div class="bar">
@@ -2172,37 +2172,22 @@
   // A message for the load panel about a file or a link.
   class LoadProblem extends Error {}
 
-  // The bytes of a stream; null past MAX_BYTES.
-  async function readCapped(stream, progress) {
+  // A list-mods file as text, up to MAX_BYTES. The browser has already undone a bytebin's Content-Encoding: gzip.
+  async function listText(stream, progress) {
     const reader = stream.getReader();
     const chunks = [];
     let size = 0;
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) return new Uint8Array(await new Blob(chunks).arrayBuffer());
+      if (done) return new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
       size += value.length;
       if (size > MAX_BYTES) {
         reader.cancel();
-        return null;
+        throw new LoadProblem(`The file is bigger than ${formatSize(MAX_BYTES)}, far more than list-mods writes, so it was not loaded.`);
       }
       chunks.push(value);
       progress?.(size);
     }
-  }
-
-  // A list-mods file as text: list-mods --upload gzips it for litterbox, and the browser has already undone a
-  // bytebin's Content-Encoding: gzip.
-  async function listText(stream, progress) {
-    let bytes = await readCapped(stream, progress);
-    if (bytes?.[0] === 0x1f && bytes[1] === 0x8b) {
-      try {
-        bytes = await readCapped(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')));
-      } catch {
-        throw new LoadProblem('The file is gzip-compressed but does not unpack, so it is damaged.');
-      }
-    }
-    if (!bytes) throw new LoadProblem(`The file is bigger than ${formatSize(MAX_BYTES)}, far more than list-mods writes, so it was not loaded.`);
-    return new TextDecoder().decode(bytes);
   }
 
   function loadFile(file) {
