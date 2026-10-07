@@ -35,7 +35,7 @@
     h3 { font-size: 1rem; margin: 18px 0 8px; }
     p { margin: 0 0 10px; }
     .muted, .empty { color: var(--muted); }
-    .error { color: var(--bad); }
+    .error { color: var(--bad); overflow-wrap: anywhere; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; }
     .panel > :last-child { margin-bottom: 0; }
     input, select, textarea, button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
@@ -153,6 +153,7 @@
     .problem-kind.info > summary { color: var(--muted); }
     .problem-kind ul { list-style: none; margin: 2px 0 8px; padding-left: 14px; font-size: 0.88rem; }
     .problem-kind li { margin: 2px 0; }
+    #load-status { min-width: 0; overflow-wrap: anywhere; }
     #output { background: var(--code-bg); border-radius: 6px; padding: 10px; margin: 0 0 8px; font: 0.82rem/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
     #drop-overlay { position: fixed; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 85%, transparent); border: 3px dashed var(--accent); font-size: 1.2rem; font-weight: 600; pointer-events: none; z-index: 10; }
   </style>
@@ -165,20 +166,22 @@
   </header>
   <p class="lead">
     Picks, orders and configures the workshop mods of a server running the <code>ghcr.io/gameserver-images/project-zomboid</code> image.
-    Load what <code>docker exec &lt;container&gt; list-mods</code> prints, then copy the <code>.env</code> lines this page builds. Nothing leaves your browser.
+    Load what <code>docker exec &lt;container&gt; list-mods</code> prints, then copy the <code>.env</code> lines this page builds. Nothing you load or change leaves your browser.
   </p>
 
   <section id="load" class="panel">
     <h2>Load your server's mods</h2>
-    <p>Start the server once so it downloads its mods, run <code>docker exec &lt;container&gt; list-mods &gt; mods.json</code>, then choose the file, drop it anywhere on this page or paste its contents.</p>
+    <p>Start the server once so it downloads its mods, run <code>docker exec &lt;container&gt; list-mods &gt; mods.json</code>, then choose the file, drop it anywhere on this page or paste its contents.
+      In Portainer, run <code>list-mods --upload</code> in the container's console instead and open the link it prints. The link's host sees who downloads the file.</p>
     <p id="load-note" class="muted" hidden>Loading a file starts over from that server's settings.</p>
     <div class="bar">
-      <input id="file" type="file" accept=".json,application/json" aria-label="list-mods JSON file">
+      <input id="file" type="file" accept=".json,.gz,application/json,application/gzip" aria-label="list-mods JSON file">
     </div>
     <textarea id="paste" rows="4" placeholder="Or paste the JSON here" aria-label="list-mods JSON"></textarea>
     <div class="bar">
       <button id="paste-load" type="button" class="primary">Load pasted JSON</button>
       <button id="load-cancel" type="button" hidden>Cancel</button>
+      <span id="load-status" class="hint" role="status"></span>
     </div>
     <p id="load-error" class="error" role="alert"></p>
   </section>
@@ -300,6 +303,13 @@
   const B41_ANTICHEAT_RE = /anti[- ]?cheat\s*(?:protection\s*)?(?:type\s*)?#?(\d+)(thresholdmultiplier)?(?!\w)/i;
   const OFF_RE = /\b(?:disabl|deactivat)\w*|\b(?:turn|switch)\w*(?:\s+[\w-]+){0,3}\s+off\b|\bfalse\b/i;
   const HINT_RE = /load (it |this |them )?(after|before|first|last)|load order|requires?|required|dependenc|incompatib|conflict|not compatible|don'?t use with|mod ?id|workshop ?id/i;
+  // Every character some reader of an env file may end a line at: Unicode's line breaks and Python's splitlines().
+  const LINE_BREAK = /[\n\v\f\r\x1c-\x1e\x85\u2028\u2029]/;
+  // The names list-env gives sandbox settings, the only ones the image applies: the Lua keys joined with __.
+  const SANDBOX_ENV = /^SANDBOX_[A-Za-z0-9_]+$/;
+  // Far more than list-mods writes for any server; a gzip bomb stops there too.
+  const MAX_BYTES = 20 * 1024 * 1024;
+  const DOWNLOAD_SECONDS = 30;
   const PROBLEM_KINDS = [
     ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
     ['version', () => `Don't load on ${model.gameVersion}`],
@@ -361,6 +371,7 @@
   const list = x => (Array.isArray(x) ? x : []);
   const text = x => (typeof x === 'string' ? x : null);
   const texts = x => list(x).filter(v => typeof v === 'string');
+  const oneLine = v => typeof v === 'string' && !LINE_BREAK.test(v);
   const splitList = s => s.split(';').map(v => v.trim()).filter(Boolean);
   // Mods= the way the server reads it: Build 42 drops every backslash first, so `<workshop id>\ModId` is one ID.
   const modIds = s => [...new Set(splitList(model.b41 ? s : s.replace(/\\/g, '')))];
@@ -402,8 +413,13 @@
 
   const said = value => (value === '' ? 'an empty value' : value);
 
-  // Docker Compose and the import end an unquoted value at ' #' and take off the quotes around one.
-  const envValue = v => (/\s#|^\s|\s$|^["']/.test(v) ? (v.includes("'") ? `"${v.replace(/[\\"]/g, '\\$&')}"` : `'${v}'`) : v);
+  // A value as Docker Compose's env_file (the README's setup) reads it back: Compose expands $ in bare and double-quoted
+  // values, cuts a bare one at ' #' and trims it, and reads on after a closing quote; in single quotes only \' counts.
+  function envValue(v) {
+    if (!/^["']|\$|\s#|^\s|\s$/.test(v)) return v;
+    if (!v.includes("'") && !v.endsWith('\\')) return `'${v}'`;
+    return `"${v.replace(/[\\"$]/g, '\\$&')}"`;
+  }
 
   const formatDate = t => (typeof t === 'number' ? new Date(t * 1000).toISOString().slice(0, 10) : null);
 
@@ -412,7 +428,7 @@
     return description
       .replace(/\[\*\]|\[\/?(?:h\d|p|list|olist|li|quote|code|table|tr|td|th|hr|br)\b[^\]]*\]/gi, '\n')
       .replace(/\[\/?[a-z][a-z0-9]*(?:=[^\]]*)?\]/gi, '')
-      .split(/\r?\n/)
+      .split(LINE_BREAK)
       .map(line => line.replace(/\s+/g, ' ').trim());
   }
 
@@ -447,6 +463,15 @@
     }
     if (typeof json.gameVersion !== 'string' || !json.gameVersion) return 'The file has no gameVersion.';
     if (!Array.isArray(json.items)) return 'The file has no items list.';
+    // A bad sandbox value is left out on its own, but leaving out a mod or map would change what the server loads.
+    const mods = json.items.flatMap(item => list(item?.mods));
+    const option = mods.flatMap(mod => list(mod?.sandbox)).find(o => typeof o?.env !== 'string' || !SANDBOX_ENV.test(o.env));
+    if (option !== undefined) {
+      return `The file names a sandbox variable ${JSON.stringify(clip(String(option?.env)))}, which is not SANDBOX_ followed by letters, digits and underscores.`;
+    }
+    const names = [json.workshopIds, json.server?.mods, json.server?.map, ...mods.flatMap(mod => [[mod?.id], mod?.maps, mod?.require])].flatMap(texts);
+    const broken = names.find(name => LINE_BREAK.test(name));
+    if (broken !== undefined) return `The file has a line break in ${JSON.stringify(clip(broken))}, which would start a new .env line.`;
     return null;
   }
 
@@ -522,7 +547,7 @@
           loadModBefore: texts(rawMod.loadModBefore), incompatible: texts(rawMod.incompatible), maps: texts(rawMod.maps),
           // Build 41 keeps spaces around an id= value, but the server trims what names a mod, so nothing reaches it.
           error: text(rawMod.error) ?? (rawMod.id !== rawMod.id.trim() ? "its id= has spaces around it, which the server's Mods= can't match" : null),
-          sandbox: list(rawMod.sandbox).filter(o => typeof o?.env === 'string').map(sandboxOption),
+          sandbox: list(rawMod.sandbox).map(sandboxOption),
         };
         // The game loads the require entries as written, and one with spaces around it names no mod.
         const spaced = mod.requireEntries.find(r => r !== r.trim()) ?? null;
@@ -552,32 +577,46 @@
     return m;
   }
 
-  function buildTree(m) {
-    const group = (id, path, seen) => {
-      const c = m.collections.get(id);
-      const g = { gid: path, title: c.title || `Collection ${id}`, collectionId: id, children: [], itemIds: new Set() };
+  // Each collection shows once, where it comes first, and elsewhere only adds its items ({ shown }): a file that lists a
+  // collection twice at every level would otherwise grow the tree exponentially.
+  function collectionGroups(m, ids) {
+    const made = new Map(); // null while the collection's own children are read
+    const group = (cid, path) => {
+      const c = m.collections.get(cid);
+      const g = { gid: path, title: c.title || `Collection ${cid}`, collectionId: cid, children: [], itemIds: new Set() };
+      made.set(cid, null);
       for (const child of c.children) {
         if (m.collections.has(child)) {
-          if (seen.has(child)) continue;
-          const sub = group(child, `${path}/${child}`, new Set([...seen, child]));
-          g.children.push({ group: sub });
+          if (made.get(child) === null) continue;
+          const shown = made.get(child);
+          const sub = shown || group(child, `${path}/${child}`);
+          g.children.push(shown ? { shown } : { group: sub });
           for (const itemId of sub.itemIds) g.itemIds.add(itemId);
         } else if (m.items.has(child)) {
           g.children.push({ itemId: child });
           g.itemIds.add(child);
         }
       }
+      made.set(cid, g);
       return g;
     };
-    m.collectionItems = new Map([...m.collections.keys()].map(id => [id, group(id, id, new Set([id])).itemIds]));
-    m.groups = m.workshopIds.filter(id => m.collections.has(id)).map(id => group(id, id, new Set([id])));
+    const groups = [];
+    for (const id of ids) if (!made.has(id)) groups.push(group(id, id));
+    return groups;
+  }
+
+  function buildTree(m) {
+    m.groups = collectionGroups(m, m.workshopIds.filter(id => m.collections.has(id)));
+    // The items of each collection looked up so far, all the way down.
+    m.collectionItems = new Map(m.groups.map(g => [g.collectionId, g.itemIds]));
     // Bands: the first-level sub-collections of each WORKSHOP_IDS collection, or the collection itself for its
     // direct items. Every item of these collections gets one.
     m.bandCollection = new Map();
     m.bandCollections = [];
     for (const g of m.groups) {
       for (const child of g.children) {
-        const [bandId, itemIds] = child.group ? [child.group.collectionId, child.group.itemIds] : [g.collectionId, [child.itemId]];
+        const sub = child.group || child.shown;
+        const [bandId, itemIds] = sub ? [sub.collectionId, sub.itemIds] : [g.collectionId, [child.itemId]];
         for (const itemId of itemIds) if (!m.bandCollection.has(itemId)) m.bandCollection.set(itemId, bandId);
         if (!m.bandCollections.includes(bandId)) m.bandCollections.push(bandId);
       }
@@ -601,11 +640,19 @@
 
   // ---- What the server makes of a mod ID ----
 
+  // The items of a collection, all the way down; null for an ID that is no collection. WORKSHOP_IDS from an import can
+  // name any collection.
+  function collectionItems(id) {
+    if (!model.collections.has(id)) return null;
+    if (!model.collectionItems.has(id)) model.collectionItems.set(id, collectionGroups(model, [id])[0].itemIds);
+    return model.collectionItems.get(id);
+  }
+
   // The server reads mods from the items in WorkshopItems, in that order, and the image rewrites WorkshopItems
   // from WORKSHOP_IDS, sorted, on every start.
   function newView() {
     const items = new Set();
-    for (const id of state.workshopIds) for (const itemId of model.collectionItems.get(id) || [id]) items.add(itemId);
+    for (const id of state.workshopIds) for (const itemId of collectionItems(id) || [id]) items.add(itemId);
     const rank = new Map();
     for (const id of state.workshopIds.length ? [...items].sort() : model.server.workshopItems) if (!rank.has(id)) rank.set(id, rank.size);
     return { rank, entries: new Map(), failures: new Map(), alone: new Map() };
@@ -760,16 +807,16 @@
   function restoredState(saved) {
     const s = initialState();
     if (!saved || typeof saved !== 'object') return s;
-    if (Array.isArray(saved.mods)) s.mods = [...new Set(texts(saved.mods).filter(Boolean))];
+    if (Array.isArray(saved.mods)) s.mods = [...new Set(list(saved.mods).filter(id => id && oneLine(id)))];
     const values = saved.values && typeof saved.values === 'object' ? saved.values : {};
     for (const [env, value] of Object.entries(values)) if (typeof value === 'string' && model.options.has(env)) s.values[env] = value;
     const ini = saved.ini && typeof saved.ini === 'object' ? saved.ini : {};
-    for (const [key, value] of Object.entries(ini)) if (typeof value === 'string') s.ini[key] = value;
+    for (const [key, value] of Object.entries(ini)) if (oneLine(value)) s.ini[key] = value;
     if (saved.bandMode === 'category') s.bandMode = 'category';
     for (const mode of ['collection', 'category']) s.bandOrder[mode] = texts(saved.bandOrder?.[mode]);
-    if (Array.isArray(saved.maps)) s.maps = texts(saved.maps);
+    if (Array.isArray(saved.maps)) s.maps = list(saved.maps).filter(oneLine);
     s.includeMap = saved.includeMap === true;
-    if (Array.isArray(saved.workshopIds)) s.workshopIds = texts(saved.workshopIds);
+    if (Array.isArray(saved.workshopIds)) s.workshopIds = list(saved.workshopIds).filter(oneLine);
     if (Array.isArray(saved.open)) s.open = texts(saved.open);
     if (TABS.includes(saved.tab)) s.tab = saved.tab;
     return s;
@@ -795,6 +842,7 @@
 
   function invalid(o, v) {
     if (v === null) return null;
+    if (LINE_BREAK.test(v)) return 'must be on one line';
     const t = v.trim();
     if (o.type === 'boolean') return /^(true|false)$/i.test(t) ? null : 'must be true or false';
     if (o.type === 'integer') return /^-?\d+$/.test(t) ? null : 'must be a whole number';
@@ -1076,9 +1124,9 @@
 
   function output() {
     const lines = [];
-    if (state.workshopIds.length) lines.push(`WORKSHOP_IDS=${state.workshopIds.join(';')}`);
-    lines.push(`INI_Mods=${state.mods.map(id => (model.b41 ? id : `\\${id}`)).join(';')}`);
-    if (state.includeMap) lines.push(`INI_Map=${derived.maps.map(entry => entry.name).join(';')}`);
+    if (state.workshopIds.length) lines.push(`WORKSHOP_IDS=${envValue(state.workshopIds.join(';'))}`);
+    lines.push(`INI_Mods=${envValue(state.mods.map(id => (model.b41 ? id : `\\${id}`)).join(';'))}`);
+    if (state.includeMap) lines.push(`INI_Map=${envValue(derived.maps.map(entry => entry.name).join(';'))}`);
     for (const key of derived.settingKeys) if (Object.hasOwn(state.ini, key)) lines.push(`INI_${key}=${envValue(state.ini[key])}`);
     const seen = new Set();
     let changed = 0;
@@ -1094,7 +1142,7 @@
           continue;
         }
         changed++;
-        lines.push(`${o.env}=${o.type === 'boolean' ? v.trim().toLowerCase() : o.type === 'string' ? v : v.trim()}`);
+        lines.push(`${o.env}=${envValue(o.type === 'boolean' ? v.trim().toLowerCase() : o.type === 'string' ? v : v.trim())}`);
       }
     }
     return { text: `${lines.join('\n')}\n`, changed, skipped };
@@ -1371,6 +1419,9 @@
         if (child.group) {
           const node = groupNode(child.group, matched);
           if (node) body.append(node);
+        } else if (child.shown) {
+          const hit = !matched || [...child.shown.itemIds].some(id => matched.has(id));
+          if (hit) body.append(h('p', { class: 'hint', text: `${child.shown.title} is shown above.` }));
         } else if (!matched || matched.has(child.itemId)) {
           body.append(itemNode(model.items.get(child.itemId)));
         }
@@ -1857,7 +1908,7 @@
     }
     let bar = null;
     if (ask.value !== null) {
-      const line = `INI_${ask.key}=${ask.value}`;
+      const line = `INI_${ask.key}=${envValue(ask.value)}`;
       const added = Object.hasOwn(state.ini, ask.key) && sameValue(state.ini[ask.key], ask.value);
       const refocus = () => [...settingNodes.get(item.id)?.querySelectorAll('button[data-ini]') || []].find(b => b.dataset.ini === line)?.focus();
       bar = h('div', { class: 'bar' }, h('code', { text: line }),
@@ -1931,10 +1982,11 @@
 
   // ---- Loading, importing, clearing ----
 
-  // A drop can fail while the load panel is hidden behind a loaded file.
-  function showLoadError(message) {
-    if (message && $('load').hidden) openLoad();
-    $('load-error').textContent = message;
+  // A drop or a link can fail while the load panel is hidden behind a loaded file. No parts clear the message.
+  function showLoadError(...parts) {
+    if (parts.length && $('load').hidden) openLoad();
+    $('load-error').replaceChildren(...parts);
+    if (parts.length) $('load-error').scrollIntoView({ block: 'nearest' });
   }
 
   function openLoad() {
@@ -1949,10 +2001,9 @@
     state = restoredState(saved);
     sandboxSections.clear();
     problemsOpen.clear();
-    showLoadError('');
+    showLoadError();
     $('load').hidden = true;
     $('app').hidden = false;
-    $('remember-note').hidden = remembering;
     $('band-mode').value = state.bandMode;
     $('include-map').checked = state.includeMap;
     $('search').value = '';
@@ -1965,6 +2016,7 @@
   }
 
   function loadText(source) {
+    stopDownload();
     let json;
     try {
       json = JSON.parse(source);
@@ -1978,17 +2030,22 @@
       return;
     }
     loadId = `${Date.now()}-${Math.random()}`;
-    // No earlier file's state may outlive this load, and removing it frees space.
-    store.remove(STATE_KEY);
-    remembering = store.set(JSON_KEY, source) && store.set(LOAD_KEY, loadId);
-    if (!remembering) {
-      store.remove(JSON_KEY);
-      store.remove(LOAD_KEY);
-    }
-    $('remember-note').textContent = 'This file is too big for the browser to remember, so it is gone when you close the page.';
+    // No earlier file may outlive this load, and removing it frees space. This one is stored once it shows, so a file
+    // the page fails on doesn't come back on every start.
+    for (const key of [JSON_KEY, STATE_KEY, LOAD_KEY]) store.remove(key);
+    remembering = false;
     $('paste').value = '';
     $('file').value = '';
     start(json, null);
+    remembering = store.set(JSON_KEY, source) && store.set(LOAD_KEY, loadId);
+    if (remembering) {
+      $('remember-note').hidden = true;
+      saveState();
+    } else {
+      store.remove(JSON_KEY);
+      store.remove(LOAD_KEY);
+      stopRemembering('This file is too big for the browser to remember, so it is gone when you close the page.');
+    }
   }
 
   function restore() {
@@ -2010,10 +2067,12 @@
     loadId = store.get(LOAD_KEY);
     if (saved?.load !== loadId) saved = null;
     remembering = true;
+    $('remember-note').hidden = true;
     start(json, saved);
   }
 
   function clearAll() {
+    stopDownload();
     store.remove(JSON_KEY);
     store.remove(STATE_KEY);
     store.remove(LOAD_KEY);
@@ -2042,21 +2101,24 @@
     return match ? match[1] + match[2].toLowerCase() : name;
   }
 
+  // broken: the lines whose value has a line break, which the .env lines must not get.
   function parseEnv(source) {
     const env = new Map();
+    let broken = 0;
     for (const line of source.split(/\r?\n/)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
+      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/s.exec(line);
       if (!match) continue;
       const raw = match[2].trim();
       const quoted = /^(["'])([\s\S]*)\1\s*(#.*)?$/.exec(raw);
-      if (!quoted) env.set(envKey(match[1]), raw.replace(/\s+#.*$/, ''));
-      else env.set(envKey(match[1]), quoted[1] === '"' ? quoted[2].replace(/\\([\\"])/g, '$1') : quoted[2]);
+      const value = !quoted ? raw.replace(/\s+#.*$/, '') : quoted[1] === '"' ? quoted[2].replace(/\\([\\"$])/g, '$1') : quoted[2];
+      if (LINE_BREAK.test(value)) broken++;
+      else env.set(envKey(match[1]), value);
     }
-    return env;
+    return { env, broken };
   }
 
   function importEnv() {
-    const env = parseEnv($('env-text').value);
+    const { env, broken } = parseEnv($('env-text').value);
     const done = [];
     if (env.has('INI_mods')) {
       state.mods = modIds(env.get('INI_mods'));
@@ -2103,7 +2165,116 @@
       done.length ? `Imported ${done.join(', ')}.` : kept ? '' : 'Found nothing to import.',
       kept ? `Kept ${plural(kept, 'INI_ setting')} of items whose mods are off; the .env lines get ${kept === 1 ? 'it' : 'them'} once you enable those mods.` : '',
       others ? `Skipped ${plural(others, 'SANDBOX_ variable')} that none of these mods has; vanilla settings stay as they are in your env file.` : '',
+      broken ? `Skipped ${plural(broken, 'line')} with a line break in the value.` : '',
     ].filter(Boolean).join(' ');
+  }
+
+  // A message for the load panel about a file or a link.
+  class LoadProblem extends Error {}
+
+  // The bytes of a stream; null past MAX_BYTES.
+  async function readCapped(stream, progress) {
+    const reader = stream.getReader();
+    const chunks = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return new Uint8Array(await new Blob(chunks).arrayBuffer());
+      size += value.length;
+      if (size > MAX_BYTES) {
+        reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+      progress?.(size);
+    }
+  }
+
+  // A list-mods file as text: list-mods --upload gzips it for litterbox, and the browser has already undone a
+  // bytebin's Content-Encoding: gzip.
+  async function listText(stream, progress) {
+    let bytes = await readCapped(stream, progress);
+    if (bytes?.[0] === 0x1f && bytes[1] === 0x8b) {
+      try {
+        bytes = await readCapped(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')));
+      } catch {
+        throw new LoadProblem('The file is gzip-compressed but does not unpack, so it is damaged.');
+      }
+    }
+    if (!bytes) throw new LoadProblem(`The file is bigger than ${formatSize(MAX_BYTES)}, far more than list-mods writes, so it was not loaded.`);
+    return new TextDecoder().decode(bytes);
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    stopDownload();
+    listText(file.stream()).then(loadText, error => showLoadError(error.message));
+  }
+
+  let download = null; // the AbortController of the link being downloaded
+
+  // Without a file loaded, Cancel is there only while a link downloads.
+  function stopDownload() {
+    download?.abort();
+    download = null;
+    $('load-status').textContent = '';
+    if (!model) $('load-cancel').hidden = true;
+  }
+
+  // #url=<link>, as list-mods --upload prints it. The fragment goes right away, so a reload doesn't download the file
+  // again and start over.
+  async function openLink() {
+    const link = /^#url=(.*)$/.exec(location.hash)?.[1];
+    if (link === undefined) return;
+    history.replaceState(null, '', location.pathname + location.search);
+    stopDownload();
+    let url = null;
+    try {
+      url = new URL(link);
+    } catch {
+      // Refused below.
+    }
+    if (url?.protocol !== 'https:' || url.username || url.password) {
+      showLoadError('The page opens only https:// links without a user name or password.');
+      return;
+    }
+    const controller = new AbortController();
+    let late = false;
+    const timer = setTimeout(() => {
+      late = true;
+      controller.abort();
+    }, DOWNLOAD_SECONDS * 1000);
+    download = controller;
+    showLoadError();
+    if ($('load').hidden) openLoad();
+    $('load-cancel').hidden = false;
+    $('load-status').textContent = `Downloading from ${url.host}…`;
+    $('load-status').scrollIntoView({ block: 'nearest' });
+    const progress = size => { $('load-status').textContent = `Downloading from ${url.host}: ${formatSize(size)}`; };
+    const instead = () => ['open ', h('a', { href: url.href, target: '_blank', rel: 'noopener noreferrer', text: url.href }), ', save the file and choose it above.'];
+    let text = null;
+    let problem = null;
+    try {
+      const response = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', signal: controller.signal });
+      if (response.status === 404 || response.status === 410) {
+        problem = [`The file at ${url.host} is deleted or has expired: run list-mods --upload again and open the new link.`];
+      } else if (!response.ok) {
+        problem = [`${url.host} answered HTTP ${response.status}: `, ...instead()];
+      } else {
+        text = await listText(response.body, progress);
+      }
+    } catch (error) {
+      // Otherwise the timeout, or the network or CORS stopped fetch() (a TypeError).
+      problem = error instanceof LoadProblem ? [error.message]
+        : [late ? `${url.host} did not send the file within ${DOWNLOAD_SECONDS} seconds: ` : `Could not download from ${url.host}: `, ...instead()];
+    } finally {
+      clearTimeout(timer);
+    }
+    // Cancelled, or replaced by another load.
+    if (download !== controller) return;
+    stopDownload();
+    if (problem) showLoadError(...problem);
+    else loadText(text);
   }
 
   function isFileDrag(e) {
@@ -2112,12 +2283,13 @@
 
   // ---- Wiring ----
 
-  $('file').addEventListener('change', () => $('file').files[0]?.text().then(loadText));
+  $('file').addEventListener('change', () => loadFile($('file').files[0]));
   $('paste-load').addEventListener('click', () => loadText($('paste').value));
   $('show-load').addEventListener('click', openLoad);
   $('load-cancel').addEventListener('click', () => {
-    showLoadError('');
-    $('load').hidden = true;
+    stopDownload();
+    showLoadError();
+    if (model) $('load').hidden = true;
   });
   $('clear').addEventListener('click', clearAll);
   $('env-import').addEventListener('click', importEnv);
@@ -2198,11 +2370,14 @@
     e.preventDefault();
     clearTimeout(overlayTimer);
     overlay.hidden = true;
-    e.dataTransfer.files[0]?.text().then(loadText);
+    loadFile(e.dataTransfer.files[0]);
   });
+
+  window.addEventListener('hashchange', openLink);
 
   readKeep();
   restore();
+  openLink();
 </script>
 </body>
 </html>

@@ -1,12 +1,41 @@
 #!/bin/bash
 # Prints one JSON document for the mods page of the docs site: the workshop items of WORKSHOP_IDS,
 # of the server's WorkshopItems and on disk, with their Steam details and the mods in them, each
-# mod's requirements, maps and sandbox options for the version of the installed game, and the server's
-# INI settings without its secrets.
-# Usage: list-mods > mods.json
+# mod's requirements, maps and sandbox options for the version of the installed game, and the few server
+# INI settings the mods page uses. The values of passwords, tokens, webhooks, Discord and RCON settings and
+# the announced IP stay out, mods' sandbox options included.
+# --upload sends it gzipped to litterbox.catbox.moe, which deletes it after an hour, to pastes.dev,
+# which keeps it for good, or to the bytebin server at that URL, and prints a mods page link that loads it.
+# Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]
 
 set -euo pipefail
 shopt -s nullglob
+
+mods_page='https://gameserver-images.github.io/Project-Zomboid/mods.html'
+user_agent='project-zomboid-list-mods (github.com/Gameserver-Images/Project-Zomboid)'
+
+usage() {
+  echo 'Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]' >&2
+  exit 2
+}
+
+# https without user info, in characters the mods page link needs no escaping for.
+bytebin_url='^https://([A-Za-z0-9.-]+(:[0-9]+)?)(/[A-Za-z0-9._~-]+)*/?$'
+upload=""
+case "$#:${1:-}" in
+  0:) ;;
+  1:--upload)
+    upload=litterbox host=litterbox.catbox.moe deleted='which deletes it after 1 hour' ;;
+  2:--upload)
+    if [ "$2" = pastes.dev ]; then
+      upload=bytebin base=https://api.pastes.dev host=pastes.dev deleted="which keeps it for good; nobody can delete it"
+    elif [[ "$2" =~ ${bytebin_url} ]]; then
+      upload=bytebin base="${2%/}" host="${BASH_REMATCH[1]}" deleted='whose settings decide when it is deleted'
+    else
+      usage
+    fi ;;
+  *) usage ;;
+esac
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # shellcheck source=scripts/lib/config.sh
@@ -221,6 +250,10 @@ jq -n -c \
   def ids: if . == "" then [] else split(",") end;
   def number: tonumber? // null;
   def unquote: if test("^\".*\"$") then .[1:-1] | gsub("\\\\(?<c>[\"\\\\])"; .c) else . end;
+  # The settings whose values stay out: the keys list-env masks (password, token), webhook URLs, which hold a
+  # token of their own, the Discord and RCON settings and the announced IP. RCON keys start with "rcon"; others
+  # contain it, such as ItemNumbersLimitPerContainer.
+  def secret: ascii_downcase | test("password|token|webhook|discord|^rcon|announced_ip");
 
   ($files | rows) as $files
   | ($files | map(select(.[0] == "map")) | group_by(.[1])
@@ -252,7 +285,7 @@ jq -n -c \
        page: (.page | text), pageLabel: (if .page == "" then null else $labels["Sandbox_" + .page] end),
        label: (if .translation == "" then null else $labels["Sandbox_" + .translation] end),
        tooltip: (if .translation == "" then null else $labels["Sandbox_" + .translation + "_tooltip"] end),
-       current: $current[.env | ascii_downcase]};
+       current: (if .option | split(".") | any(secret) then null else $current[.env | ascii_downcase] end)};
 
   # error: why the game does not find the mod. requireEntries: the require entries as the game loads
   # them, untrimmed and with empty ones.
@@ -266,16 +299,7 @@ jq -n -c \
       maps: ($maps[$key] // []), sandbox: [($options[$key] // [])[] | sandbox($labels[$key] // {})]}])
     | group_by(.[0]) | map({key: .[0][0], value: (map(.[1]) | sort_by(.folder))}) | from_entries) as $item_mods
 
-  | {
-      format: 2,
-      gameVersion: $version,
-      workshopIds: ($workshop_ids | lines),
-      server: {mods: ($server_mods | lines), map: ($server_map | lines), workshopItems: ($server_items | lines),
-        # Without the keys list-env masks (password, token) and webhook URLs, which hold a token of their own.
-        options: ($settings | map(select(.[0] == "ini") | {key: (.[1] | ltrimstr("INI_")), value: (.[2] // "")}
-          | select(.key | ascii_downcase | test("password|token|webhook") | not)) | from_entries)},
-      collections: [$tree[] | select(.children != null) | {id, title: $info[.id].title, children: [.children[].id]}],
-      items: [
+  | [
         [$tree[] | if .children == null then .id else .children[] | select(.collection | not) | .id end]
         + ($server_items | lines) + ($downloaded | keys) | unique | sort_by(length, .)
         | .[] as $id | $info[$id] as $i
@@ -284,6 +308,64 @@ jq -n -c \
            updated: ($i.time_updated | number), size: ($i.file_size | number),
            requiredItems: (if $keyed then [$required[$id].children[]?.publishedfileid] else null end),
            downloaded: ($downloaded[$id] != null), mods: ($item_mods[$id] // [])}
-      ]
+    ] as $items
+  # The words of the workshop pages of the items, for the server settings they name.
+  | ([$items[].description // empty | ascii_downcase | scan("[a-z0-9_]+")] | unique | map({key: ., value: true}) | from_entries) as $words
+  | {
+      format: 2,
+      gameVersion: $version,
+      workshopIds: ($workshop_ids | lines),
+      server: {mods: ($server_mods | lines), map: ($server_map | lines), workshopItems: ($server_items | lines),
+        # Only what the mods page reads: the Lua checksum, the anti-cheat settings and the settings a workshop page names.
+        options: ($settings | map(select(.[0] == "ini") | {key: (.[1] | ltrimstr("INI_")), value: (.[2] // "")}
+          | select((.key | secret | not) and (.key == "DoLuaChecksum" or (.key | test("^anticheat"; "i")) or $words[.key | ascii_downcase])))
+          | from_entries)},
+      collections: [$tree[] | select(.children != null) | {id, title: $info[.id].title, children: [.children[].id]}],
+      items: $items
     }
-'
+' > "${tmp}/mods.json"
+
+if [ -z "${upload}" ]; then
+  cat "${tmp}/mods.json"
+  exit 0
+fi
+
+upload_error() {
+  echo "Error: could not upload to ${host}: $1. Write the file instead: docker exec <container> list-mods > mods.json" >&2
+  exit 1
+}
+
+gzip -9 < "${tmp}/mods.json" > "${tmp}/mods.json.gz"
+# Litterbox keeps the file name's extension. Bytebin serves the file with the Content-Encoding it got, so
+# browsers decompress it.
+if [ "${upload}" = litterbox ]; then
+  request=(-F reqtype=fileupload -F time=1h -F "fileToUpload=@${tmp}/mods.json.gz" https://litterbox.catbox.moe/resources/internals/api.php)
+else
+  request=(-H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary "@${tmp}/mods.json.gz" "${base}/post")
+fi
+: > "${tmp}/answer"
+if ! status="$(curl -sS --connect-timeout 15 --max-time 120 -A "${user_agent}" -o "${tmp}/answer" -w '%{http_code}' \
+  "${request[@]}" 2> "${tmp}/curl-error")"; then
+  upload_error "$(head -n 1 "${tmp}/curl-error" | sed 's/^curl: ([0-9]*) //')"
+fi
+# The start of the answer for messages, on one line and without control characters.
+answer="$(head -c 200 "${tmp}/answer" | LC_ALL=C tr -c '[:print:]' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+[[ "${status}" == 2[0-9][0-9] ]] || upload_error "HTTP ${status}${answer:+: ${answer}}"
+
+url=""
+if [ "${upload}" = litterbox ]; then
+  # Bash would drop NUL bytes.
+  link="$(tr '\0' '\n' < "${tmp}/answer")"
+  if [[ "${link}" =~ ^https://litter\.catbox\.moe/[A-Za-z0-9]+\.gz$ ]]; then
+    url="${link}"
+  fi
+elif key="$(jq -c .key "${tmp}/answer" 2> /dev/null)" && [[ "${key}" =~ ^\"([A-Za-z0-9]+)\"$ ]]; then
+  url="${base}/${BASH_REMATCH[1]}"
+fi
+[ -n "${url}" ] || upload_error "unexpected answer \"${answer}\""
+
+echo "Uploaded to ${host}, ${deleted}. Open this link to load it on the mods page:"
+echo "${mods_page}#url=${url}"
+echo "The file alone, to load by hand:"
+echo "${url}"
+echo "Anyone with the link can read the mod list, the sandbox settings and the few server settings the mods page uses; passwords, tokens and the like are left out."

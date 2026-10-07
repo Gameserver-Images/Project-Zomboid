@@ -636,9 +636,9 @@ case "${url}" in
         else {publishedfileid: ., result: 9} end]}}' ;;
   */GetPublishedFileDetails)
     [ -n "${FAKE_STEAM_PARTIAL:-}" ] && ids="$(jq -c --arg drop "${FAKE_STEAM_PARTIAL}" 'map(select(. != $drop))' <<< "${ids}")"
-    jq -n -c --argjson ids "${ids}" '{response: {publishedfiledetails: [$ids[] | if . == "104" then {publishedfileid: ., result: 9}
+    jq -n -c --argjson ids "${ids}" --arg about106 "${FAKE_STEAM_ABOUT_106:-}" '{response: {publishedfiledetails: [$ids[] | if . == "104" then {publishedfileid: ., result: 9}
       elif . == "107" then {publishedfileid: ., result: 2} else
-      {publishedfileid: ., result: 1, title: "Item \(.)", description: "[b]About \(.)[/b]", tags: [{tag: "Build 42"}],
+      {publishedfileid: ., result: 1, title: "Item \(.)", description: (if . == "106" and $about106 != "" then $about106 else "[b]About \(.)[/b]" end), tags: [{tag: "Build 42"}],
        time_updated: 1700000000, file_size: "4096"} end]}}' ;;
   */GetDetails)
     [[ "$*" == *"key=secret"* ]] || exit 22
@@ -760,11 +760,16 @@ EOF
   set_ini_value "${SERVER}/pzserver.ini" Mods '\MultiMod;2392709985\TsarLib; \OldMod;'
   set_ini_value "${SERVER}/pzserver.ini" Map 'Variant Map;Muldraugh, KY'
   set_ini_value "${SERVER}/pzserver.ini" WorkshopItems '101;102;105'
-  # Secrets stay out of the output; the INI has comments and a value with '=' in it.
+  # Of the INI, only DoLuaChecksum, the anti-cheat settings and the settings a workshop page names go into
+  # the output, never secrets, the Discord and RCON settings or the announced IP, even when a page names them;
+  # the INI has comments and a value with '=' in it.
   set_ini_value "${SERVER}/pzserver.ini" Password hunter2
   set_ini_value "${SERVER}/pzserver.ini" RCONPassword rcon-secret
   printf '%s\n' '# The bot token' 'discordtoken=discord-secret' 'WebhookAddress=https://hooks.example/webhook-secret' \
-    'WebhookAddress =https://hooks.example/space-secret' 'DoLuaChecksum=true' 'ServerWelcomeMessage=Hi <RGB:1,0,0> a=b' >> "${SERVER}/pzserver.ini"
+    'WebhookAddress =https://hooks.example/space-secret' 'DoLuaChecksum=true' 'ServerWelcomeMessage=Hi <RGB:1,0,0> a=b' \
+    'RCONPort=27654' 'DiscordEnable=true' 'DiscordChatChannel=chat-channel-secret' 'DiscordChannelID=channel-id-secret' \
+    'server_browser_announced_ip=203.0.113.7' 'ItemNumbersLimitPerContainer=100' 'DisableSafehouseWhenOwnerConnected=true' \
+    'ApiToken=api-token-secret' 'AntiCheatSafety=2' >> "${SERVER}/pzserver.ini"
   cat > "${SERVER}/pzserver_SandboxVars.lua" <<'EOF'
 SandboxVars = {
     Zombies = 4,
@@ -776,12 +781,14 @@ SandboxVars = {
 }
 EOF
 
-  (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") || { fail "list-mods failed"; cat "${WORK}/err" >&2; return; }
+  (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' FAKE_STEAM_ABOUT_106='Set PVP=false and raise itemnumberslimitpercontainer; PublicNameX, Password, RCONPort, DiscordEnable and server_browser_announced_ip stay.' \
+    bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") || { fail "list-mods failed"; cat "${WORK}/err" >&2; return; }
   jq -e '.format == 2 and .gameVersion == "42.21.0" and .workshopIds == ["900", "104"]' "${out}" > /dev/null || fail "wrong header"
   expect_eq "$(jq -c '.server | del(.options)' "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
   expect_eq "$(jq -c .server.options "${out}")" \
-    '{"PVP":"true","Public":"false","PublicName":"My PZ Server","UPnP":"true","Mods":"\\MultiMod;2392709985\\TsarLib; \\OldMod;","Map":"Variant Map;Muldraugh, KY","WorkshopItems":"101;102;105","DoLuaChecksum":"true","ServerWelcomeMessage":"Hi <RGB:1,0,0> a=b"}'
-  grep -qE 'hunter2|rcon-secret|discord-secret|webhook-secret|space-secret|\(set\)' "${out}" && fail "list-mods printed a secret"
+    '{"PVP":"true","DoLuaChecksum":"true","ItemNumbersLimitPerContainer":"100","AntiCheatSafety":"2"}'
+  grep -qiE 'hunter2|rcon-secret|webhook-secret|space-secret|\(set\)|27654|chat-channel-secret|channel-id-secret|203\.0\.113\.7|api-token-secret|My PZ Server' "${out}" \
+    && fail "list-mods printed a secret, a Discord or RCON setting or the announced IP"
   expect_eq "$(jq -c .collections "${out}")" '[{"id":"900","title":"Item 900","children":["101","910","102"]},{"id":"910","title":"Item 910","children":["103","920"]},{"id":"920","title":"Item 920","children":[]}]'
   expect_eq "$(jq -c '[.items[] | [.id, .available, .downloaded, (.mods | map(.folder))]]' "${out}")" \
     '[["101",true,true,["Addon","Multi Version"]],["102",true,true,["Old Mod"]],["103",true,false,[]],["104",false,true,["Hidden"]],["105",true,false,[]],["106",true,true,["Loose","No Id","No Version"]],["108",true,true,["Bad","Capped","Spaces"]]]'
@@ -847,6 +854,186 @@ EOF
   (PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without a game version"
   [ -s "${out}" ] && fail "list-mods printed output without a game version"
   expect_eq "$(cat "${WORK}/err")" 'Error: could not read the game version from the game files: zombie/core/Core.class has no int constant buildVersion'
+}
+
+fake_paste() {
+  # A fake curl for the upload hosts, before the fake Steam API on PATH, which gets the Steam calls. It logs
+  # each upload's URL to HOMEDIR/paste-calls and its arguments as "[arg] " to HOMEDIR/paste-args, and copies
+  # the uploaded file to HOMEDIR/paste-body. It answers like the host, fails like curl with FAKE_PASTE=down,
+  # and answers with status FAKE_PASTE_STATUS and body FAKE_PASTE_ANSWER (printf %b) when that is set. An
+  # empty body writes no file. Other hosts fail, and so does following redirects, which would hide a 3xx.
+  mkdir -p "${WORK}/paste-bin"
+  cat > "${WORK}/paste-bin/curl" <<'CURL'
+#!/bin/bash
+url="" out="" format="" upload=""
+for ((i = 1; i <= $#; i++)); do
+  arg="${!i}"
+  case "${arg}" in
+    https://api.steampowered.com/*) exec "$(dirname "$0")/../bin/curl" "$@" ;;
+    -o) i=$((i + 1)); out="${!i}" ;;
+    -w) i=$((i + 1)); format="${!i}" ;;
+    -F | --data-binary) i=$((i + 1)); [[ "${!i}" == *@* ]] && upload="${!i#*@}" ;;
+    --location* | -L* | -[!-]*L*) echo "curl: redirects must not be followed" >&2; exit 99 ;;
+    -*) ;;
+    https://*) url="${arg}" ;;
+  esac
+done
+printf '%s\n' "${url}" >> "${HOMEDIR}/paste-calls"
+printf '[%s] ' "$@" > "${HOMEDIR}/paste-args"
+[ -n "${upload}" ] && cp "${upload}" "${HOMEDIR}/paste-body"
+if [ "${FAKE_PASTE:-}" = down ]; then
+  echo "curl: (28) Connection timed out after 15001 milliseconds" >&2
+  exit 28
+fi
+case "${url}" in
+  https://litterbox.catbox.moe/resources/internals/api.php) status=200 answer='https://litter.catbox.moe/ab12cd.gz' ;;
+  https://api.pastes.dev/post | https://bytebin.example.com:8443/paste/post) status=201 answer='{"key":"Ab12Cd"}' ;;
+  *) echo "curl: (6) Could not resolve host: ${url}" >&2; exit 6 ;;
+esac
+[ -n "${FAKE_PASTE_STATUS:-}" ] && status="${FAKE_PASTE_STATUS}" answer="${FAKE_PASTE_ANSWER}"
+[ -n "${answer}" ] && printf '%b' "${answer}" > "${out}"
+[ "${format}" = '%{http_code}' ] && printf '%s' "${status}"
+exit 0
+CURL
+  chmod +x "${WORK}/paste-bin/curl"
+}
+
+test_list_mods_upload() {
+  TEST=list-mods-upload
+  new_env
+  fake_steam
+  fake_paste
+  export FAKE_GAME_VERSION=42.21.0
+  make_mod 101 Upload UploadMod 42 "Upload Map"
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems 101
+  set_ini_value "${SERVER}/pzserver.ini" RCONPassword rcon-secret
+  local plain="${WORK}/plain.json" out="${WORK}/out" err="${WORK}/err" code args target answer arguments words
+  local page='https://gameserver-images.github.io/Project-Zomboid/mods.html#url=' own='https://bytebin.example.com:8443/paste'
+  local agent='[-A] [project-zomboid-list-mods (github.com/Gameserver-Images/Project-Zomboid)]'
+  list_mods() {
+    rm -f "${HOMEDIR}/paste-calls" "${HOMEDIR}/paste-args" "${HOMEDIR}/paste-body" "${HOMEDIR}/steam-calls"
+    PATH="${WORK}/paste-bin:${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" "$@" > "${out}" 2> "${err}"
+    code=$?
+    args="$(cat "${HOMEDIR}/paste-args" 2> /dev/null)"
+  }
+  expect_request() {
+    # $@ = the arguments the upload needs, as "[arg] [value]"
+    local expected
+    for expected in "${agent}" '[-sS]' '[--connect-timeout] [15]' '[--max-time] [120]' "$@"; do
+      [[ "${args}" == *"${expected}"* ]] || fail "the upload had no ${expected}: ${args}"
+    done
+    expect_eq "$(cat "${HOMEDIR}/paste-calls")" "${1:1:-1}"
+    gzip -dc "${HOMEDIR}/paste-body" | cmp -s - "${plain}" || fail "the upload is not the gzipped plain output"
+  }
+  expect_uploaded() {
+    # $1 = the host and when it deletes the file, $2 = the file's URL
+    expect_eq "${code}" 0
+    expect_eq "$(cat "${out}")" "$(printf '%s\n' "Uploaded to $1. Open this link to load it on the mods page:" "${page}$2" \
+      'The file alone, to load by hand:' "$2" \
+      'Anyone with the link can read the mod list, the sandbox settings and the few server settings the mods page uses; passwords, tokens and the like are left out.')"
+    [ -s "${err}" ] && fail "the upload wrote to stderr: $(cat "${err}")"
+  }
+  expect_upload_error() {
+    # $1 = the host and why; the upload was tried once
+    expect_eq "${code}" 1
+    [ -s "${out}" ] && fail "a failed upload printed $(cat "${out}")"
+    expect_eq "$(cat "${err}")" "Error: could not upload to $1. Write the file instead: docker exec <container> list-mods > mods.json"
+    expect_eq "$(wc -l < "${HOMEDIR}/paste-calls")" 1
+  }
+
+  # Mods' sandbox options named like a password, token, webhook, Discord or RCON setting keep their values out.
+  printf '%s\n' 'VERSION = 1,' 'option Upload.WebhookURL {' 'type = string, default = ,' '}' 'option Upload.AdminPassword {' 'type = string, default = ,' '}' \
+    'option UploadDiscord.Channel {' 'type = string, default = ,' '}' 'option Upload.RCONPort {' 'type = integer, min = 0, max = 65535, default = 0,' '}' \
+    'option Upload.Normal {' 'type = string, default = ,' '}' | mod_file 101/mods/Upload/42/media/sandbox-options.txt
+  cat > "${SERVER}/pzserver_SandboxVars.lua" <<'EOF'
+SandboxVars = {
+    Upload = {
+        WebhookURL = "https://discord.example/api/webhooks/123/token-secret",
+        AdminPassword = "mod-secret",
+        RCONPort = 31337,
+        Normal = "kept value",
+    },
+    UploadDiscord = {
+        Channel = "channel-secret",
+    },
+}
+EOF
+
+  # Without arguments the output stays the JSON, and nothing is uploaded.
+  list_mods
+  cp "${out}" "${plain}"
+  expect_eq "${code}" 0
+  expect_eq "$(wc -l < "${plain}")" 1
+  jq -e '.format == 2 and .items[0].mods[0].maps == ["Upload Map"] and (.server.options | has("RCONPassword") | not)' "${plain}" > /dev/null \
+    || fail "plain list-mods printed $(cat "${plain}")"
+  expect_eq "$(jq -c '[.items[0].mods[0].sandbox[] | [.option, .current]]' "${plain}")" \
+    '[["Upload.WebhookURL",null],["Upload.AdminPassword",null],["UploadDiscord.Channel",null],["Upload.RCONPort",null],["Upload.Normal","kept value"]]'
+  grep -qE 'token-secret|mod-secret|channel-secret|31337' "${plain}" && fail "list-mods printed a secret sandbox value"
+  [ -s "${err}" ] && fail "plain list-mods wrote to stderr: $(cat "${err}")"
+  [ -f "${HOMEDIR}/paste-calls" ] && fail "plain list-mods uploaded"
+
+  list_mods --upload
+  expect_request '[https://litterbox.catbox.moe/resources/internals/api.php]' '[-F] [reqtype=fileupload]' '[-F] [time=1h]'
+  [[ "${args}" == *'[-F] [fileToUpload=@'*'/mods.json.gz] '* ]] || fail "litterbox got no mods.json.gz: ${args}"
+  [[ "${args}" == *'[-H]'* || "${args}" == *'[--data-binary]'* ]] && fail "litterbox got bytebin's headers or body: ${args}"
+  expect_uploaded 'litterbox.catbox.moe, which deletes it after 1 hour' https://litter.catbox.moe/ab12cd.gz
+
+  list_mods --upload pastes.dev
+  expect_request '[https://api.pastes.dev/post]' '[-H] [Content-Type: application/json]' '[-H] [Content-Encoding: gzip]' '[--data-binary] [@'
+  [[ "${args}" == *'[--data-binary] [@'*'/mods.json.gz] '* ]] || fail "pastes.dev got no mods.json.gz: ${args}"
+  [[ "${args}" == *'[-F]'* ]] && fail "pastes.dev got a form: ${args}"
+  expect_uploaded "pastes.dev, which keeps it for good; nobody can delete it" https://api.pastes.dev/Ab12Cd
+
+  # Your own bytebin, with or without a trailing slash.
+  for target in "${own}" "${own}/"; do
+    list_mods --upload "${target}"
+    expect_request "[${own}/post]" '[-H] [Content-Type: application/json]' '[-H] [Content-Encoding: gzip]' '[--data-binary] [@'
+    expect_uploaded 'bytebin.example.com:8443, whose settings decide when it is deleted' "${own}/Ab12Cd"
+  done
+
+  # Failures name the host and why, are not retried and print nothing on stdout. What the host answers
+  # stays on one line without control characters.
+  FAKE_PASTE=down list_mods --upload
+  expect_upload_error 'litterbox.catbox.moe: Connection timed out after 15001 milliseconds'
+  FAKE_PASTE_STATUS=413 FAKE_PASTE_ANSWER='Content too large\n\033[31mtry less ' list_mods --upload pastes.dev
+  expect_upload_error 'pastes.dev: HTTP 413: Content too large [31mtry less'
+  FAKE_PASTE_STATUS=502 FAKE_PASTE_ANSWER='' list_mods --upload "${own}"
+  expect_upload_error 'bytebin.example.com:8443: HTTP 502'
+  FAKE_PASTE_STATUS=302 FAKE_PASTE_ANSWER='https://litter.catbox.moe/ab12cd.gz' list_mods --upload
+  expect_upload_error 'litterbox.catbox.moe: HTTP 302: https://litter.catbox.moe/ab12cd.gz'
+  FAKE_PASTE_STATUS=500 FAKE_PASTE_ANSWER="$(printf '%0300d' 0)" list_mods --upload
+  expect_upload_error "litterbox.catbox.moe: HTTP 500: $(printf '%0200d' 0)"
+  for answer in 'https://litter.catbox.moe/ab12cd.txt' 'http://litter.catbox.moe/ab12cd.gz' 'https://litter.catbox.moe.example.com/ab12cd.gz' \
+    'https://litterxcatbox.moe/ab12cd.gz' 'https://litter.catbox.moe/ab12cdxgz' 'https://litter.catbox.moe/ab-cd.gz' \
+    'https://litter.catbox.moe/ab12cd.gz\nhttps://example.com/x.gz' 'https://litter.catbox.moe/ab\0cd.gz' ' https://litter.catbox.moe/ab12cd.gz' \
+    'https://litter.catboxxmoe/ab12cd.gz' 'https://litter.catbox.moe/ab.cd.gz' 'https://litter.catbox.moe/a/b.gz' '' 'No file uploaded'; do
+    FAKE_PASTE_STATUS=200 FAKE_PASTE_ANSWER="${answer}" list_mods --upload
+    expect_upload_error "litterbox.catbox.moe: unexpected answer \"$(printf '%b' "${answer}" | tr '\0\n' '  ' | sed 's/^ //')\""
+  done
+  for answer in 'not json' '{"key":"../x"}' '{"key":123}' '{"key":"Ab\\u0000Cd"}' '{"key":"Ab12Cd\\n"}' '{"key":"a"}{"key":"b"}' \
+    '[{"key":"Ab12Cd"}]' '{"Key":"Ab12Cd"}' 'https://api.pastes.dev/Ab12Cd'; do
+    FAKE_PASTE_STATUS=201 FAKE_PASTE_ANSWER="${answer}" list_mods --upload pastes.dev
+    expect_upload_error "pastes.dev: unexpected answer \"$(printf '%b' "${answer}")\""
+  done
+
+  # Wrong arguments stop list-mods before it does anything.
+  for target in catbox litterbox PASTES.DEV pastes.dev.example.com '' http://bytebin.example.com http://example.com/https://bytebin.example.com \
+    https://user:pass@bytebin.example.com https://user@bytebin.example.com 'https://bytebin.example.com/a b' 'https://bytebin.example.com/?x=1' \
+    'https://bytebin.example.com/#x' https:// 'https://bytebin.example.com//' https://bytebin.example.com:x 'https://bytebin.example.com:/paste'; do
+    list_mods --upload "${target}"
+    expect_eq "${code}" 2
+    expect_eq "$(cat "${err}")" 'Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]'
+    [ -s "${out}" ] && fail "list-mods --upload '${target}' printed $(cat "${out}")"
+    [ -f "${HOMEDIR}/steam-calls" ] || [ -f "${HOMEDIR}/paste-calls" ] && fail "list-mods --upload '${target}' ran"
+  done
+  for arguments in '--upload pastes.dev extra' '--upload --upload' '--pastes' 'pastes.dev' '-u' '--upload=pastes.dev'; do
+    read -ra words <<< "${arguments}"
+    list_mods "${words[@]}"
+    expect_eq "${code}" 2
+    expect_eq "$(cat "${err}")" 'Usage: list-mods [--upload [pastes.dev | https://<your bytebin>]]'
+    [ -s "${out}" ] && fail "list-mods ${arguments} printed $(cat "${out}")"
+    [ -f "${HOMEDIR}/steam-calls" ] || [ -f "${HOMEDIR}/paste-calls" ] && fail "list-mods ${arguments} ran"
+  done
 }
 
 test_mod_folders() {
@@ -1960,7 +2147,7 @@ EOF
   [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "the game was updated with an invalid MOD_UPDATE_CHECK"
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_vars_documented test_canary_issues test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_vars_documented test_canary_issues test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 
