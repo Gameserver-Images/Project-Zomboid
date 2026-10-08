@@ -274,6 +274,12 @@
             <span id="copy-status" class="hint" role="status"></span>
           </div>
           <p id="output-note" class="hint"></p>
+          <h3>Single player</h3>
+          <p class="hint">Single player reads its mods from <code>default.txt</code>. Start the game once on that PC and close it, back up <code>Zomboid/mods/default.txt</code> in your user folder (<code>%UserProfile%\Zomboid\mods\default.txt</code> on Windows, <code>~/Zomboid/mods/default.txt</code> on Linux and macOS), replace it with this file and start the game.
+            It has the mods the server loads, in the same order. The mods must be installed on that PC (subscribed in Steam). An existing save keeps its own list in <code>mods.txt</code> in its save folder, in the same format.
+            Single player orders the maps by itself, mostly by the order of their mods, so where maps of different mods share cells, a different one can win than on the server. It keeps the order of <code>Map=</code>, which the file has too, only if two maps that share cells build on each other or on the same map of a mod.</p>
+          <div class="bar"><button id="default-txt" type="button">Download default.txt</button></div>
+          <p id="default-txt-note" class="error" hidden></p>
         </section>
       </aside>
     </div>
@@ -1100,6 +1106,7 @@
     derived = { rows, rowOf, edges, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions, settings, settingKeys };
     derived.maps = mapList(loaded);
     derived.output = output();
+    derived.single = defaultTxt(loaded);
   }
 
   // Mirrors the image: keep the admin's Map= order, drop maps of mods that don't load, add new ones before the vanilla map.
@@ -1146,6 +1153,26 @@
       }
     }
     return { text: `${lines.join('\n')}\n`, changed, skipped };
+  }
+
+  // Single player's mods/default.txt as the game writes it (ActiveModsFile: a tab on Build 41, CRLF as on Windows). Its
+  // reader joins the lines, cuts /* */ comments, ends a value at a comma and a block at a brace, and on Build 42 drops
+  // backslashes from mod IDs. Build 41 reads it in the JVM's default charset, which on its Java 17 is the Windows code page.
+  function defaultTxt(loaded) {
+    const unreadable = name => /[,{}]|\/\*/.test(name);
+    const entries = [
+      ...loaded.map(entry => ['mod', model.b41 ? entry.id : entry.id.replace(/\\/g, '')]),
+      ...derived.maps.filter(entry => entry.name !== VANILLA_MAP).map(entry => ['map', entry.name]),
+    ];
+    const written = entries.filter(([, name]) => !unreadable(name));
+    const indent = model.b41 ? '\t' : '    ';
+    const block = (type, key) => [type, '{', ...written.filter(([kind]) => kind === key).map(([, name]) => `${indent}${key} = ${name},`), '}'];
+    const lines = ['VERSION = 1,', '', ...block('mods', 'mod'), '', ...block('maps', 'map')];
+    return {
+      text: `${lines.join('\r\n')}\r\n`,
+      skipped: entries.filter(([, name]) => unreadable(name)),
+      codePage: model.b41 ? written.filter(([, name]) => /[^\x00-\x7f]/.test(name)) : [],
+    };
   }
 
   // Sort's graph: for each position in Mods=, the positions that must come after it. A mod that isn't in Mods= loads
@@ -1965,6 +1992,19 @@
     if (skipped) notes.push(`${plural(skipped, 'invalid sandbox value')} left out.`);
     if (!state.workshopIds.length) notes.push('WORKSHOP_IDS is left out because this server has none; it keeps its WorkshopItems.');
     $('output-note').textContent = notes.join(' ');
+    const { skipped: left, codePage } = derived.single;
+    const named = list => list.flatMap(([kind, name], i) => [i ? ', ' : '', `${kind} `, h('code', { text: name })]);
+    const sentences = [];
+    if (left.length) sentences.push(["Left out because the game can't read a comma, a brace or /* in default.txt: ", ...named(left), '.']);
+    if (codePage.length) sentences.push(["Build 41 reads default.txt in the PC's code page, so on Windows it may misread these, which have characters outside ASCII: ", ...named(codePage), '.']);
+    $('default-txt-note').replaceChildren(...sentences.flatMap((sentence, i) => (i ? [' ', ...sentence] : sentence)));
+    $('default-txt-note').hidden = !sentences.length;
+  }
+
+  function saveFile(text, name) {
+    const link = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: name });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
   }
 
   function copyText(value, status) {
@@ -2331,11 +2371,8 @@
     commit();
   });
   $('copy').addEventListener('click', () => copyText(derived.output.text, $('copy-status')));
-  $('download').addEventListener('click', () => {
-    const link = h('a', { href: URL.createObjectURL(new Blob([derived.output.text], { type: 'text/plain' })), download: 'mods.env' });
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 0);
-  });
+  $('download').addEventListener('click', () => saveFile(derived.output.text, 'mods.env'));
+  $('default-txt').addEventListener('click', () => saveFile(derived.single.text, 'default.txt'));
   sortable($('order-list'), 'mod', (from, insertAt) => moveMod(from, insertAt, null, null));
   sortable($('band-list'), 'band', moveBand);
   sortable($('map-list'), 'map', moveMap);
