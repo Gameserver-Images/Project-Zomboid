@@ -1717,7 +1717,8 @@ test_list_env() {
   grep -q '^INI_' "${WORK}/out" && fail "the filter kept unrelated rows"
   grep -q '^SANDBOX_ZombieLore__Mortality=' "${WORK}/out" || fail "the filter dropped matching rows"
   set_ini_value "${SERVER}/pzserver.ini" DiscordToken abc
-  bash "${SCRIPT_DIR}/list_env.sh" | grep -qxF 'INI_DiscordToken=(set)' || fail "the Discord token was shown"
+  bash "${SCRIPT_DIR}/list_env.sh" > "${WORK}/out"
+  grep -qxF 'INI_DiscordToken=(set)' "${WORK}/out" || fail "the Discord token was shown"
   bash "${SCRIPT_DIR}/list_env.sh" --tsv > "${WORK}/out"
   expect_line "${WORK}/out" "$(printf 'sandbox\tSANDBOX_ZombieLore__Mortality\t5\tDefault = Instant')"
 }
@@ -1890,7 +1891,7 @@ ${run}/4"
   expect_eq "$(calls)" 'issue list --repo,issue edit 1'
   [ -f "${gh}/comments" ] && fail "commented without a firing: $(cat "${gh}/comments")"
   expect_eq "$(body 1 | grep '^| public')" "| public | 42.21.0 stable | still needed: it fails again | [run](${run}/6) |"
-  body 1 | grep -q '^Once it has fired on every branch' || fail "said the workaround can go while a branch needs it: $(body 1)"
+  grep -q '^Once it has fired on every branch' <<< "$(body 1)" || fail "said the workaround can go while a branch needs it: $(body 1)"
   : > "${gh}/calls"
   results public 'Zone check|held|it fails again'
   issues 6
