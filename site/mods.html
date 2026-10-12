@@ -317,6 +317,7 @@
   const MAX_BYTES = 20 * 1024 * 1024;
   const DOWNLOAD_SECONDS = 30;
   const PROBLEM_KINDS = [
+    ['workshopId', 'WORKSHOP_IDS entries that are not workshop IDs', 'The image refuses to start with them. Write only the IDs, the numbers in their workshop links, separated by ";".'],
     ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
     ['version', () => `Don't load on ${model.gameVersion}`],
     ['order', 'Load order'],
@@ -978,6 +979,7 @@
     const p = Object.fromEntries([...PROBLEM_KINDS, ...INFO_KINDS].map(([kind]) => [kind, []]));
     const at = id => (rowOf.has(id) ? ` (#${rowOf.get(id) + 1})` : '');
     const goTo = id => () => goToMod(id);
+    for (const id of state.workshopIds) if (!/^[0-9]+$/.test(id)) p.workshopId.push({ text: id, go: goToImport });
 
     const { loaded, loadedWith, loops, stopped } = simulate(state.mods);
     const loadPos = new Map(loaded.map((entry, i) => [entry.id, i]));
@@ -1390,6 +1392,12 @@
     if (!node) return;
     flash(node);
     node.focus({ preventScroll: true });
+  }
+
+  function goToImport() {
+    $('import').open = true;
+    flash($('import'));
+    $('env-text').focus({ preventScroll: true });
   }
 
   function enableButton(id, refocus) {

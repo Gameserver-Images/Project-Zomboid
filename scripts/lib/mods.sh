@@ -472,6 +472,19 @@ split_list() {
   tr ';' '\n' <<< "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
 }
 
+check_workshop_ids() {
+  # Fails when an entry of WORKSHOP_IDS is no workshop ID. Steam reads an entry that starts with digits
+  # as those digits, so a mistyped one would half work.
+  local example=. quoted
+  local -a mistyped=()
+  mapfile -t mistyped < <(split_list "${WORKSHOP_IDS:-}" | grep -vxE '[0-9]+')
+  [ "${#mistyped[@]}" -gt 0 ] || return 0
+  [[ "${mistyped[0]}" =~ ^[0-9]+ ]] && example=", such as WORKSHOP_IDS=${BASH_REMATCH[0]}"
+  printf -v quoted "'%s', " "${mistyped[@]}"
+  echo "Error: WORKSHOP_IDS has entries that are not workshop IDs: ${quoted%, }. Write only the IDs, separated by ';'${example}" >&2
+  return 1
+}
+
 workshop_details() {
   # stdin = workshop IDs, one per line. Prints Steam's details of each 100 of them as one JSON line;
   # fails when Steam can't be reached or leaves an item out.

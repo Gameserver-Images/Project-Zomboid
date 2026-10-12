@@ -13,6 +13,7 @@ trap 'exit 143' TERM INT
 . "${SCRIPT_DIR}/configure.sh"
 
 update_check="$(mod_update_interval)" || exit 1
+check_workshop_ids || exit 1
 
 for dir in "${HOMEDIR}/Zomboid" "${STEAMAPPDIR}"; do
   blocked="$(find "${dir}" -type d ! -writable -print -quit 2>/dev/null)"

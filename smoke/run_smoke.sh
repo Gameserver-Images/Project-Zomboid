@@ -593,6 +593,16 @@ test_workshop() {
   grep -q "could not check the workshop items" "${WORK}/err" || fail "the incomplete answer was not reported"
 }
 
+# WORKSHOP_IDS values with entries that are no workshop IDs, each with its error after a tab.
+bad_workshop_ids() {
+  printf '%s\t%s\n' \
+    '3556493168WORKSHOP_IDS=3556493168' "Error: WORKSHOP_IDS has entries that are not workshop IDs: '3556493168WORKSHOP_IDS=3556493168'. Write only the IDs, separated by ';', such as WORKSHOP_IDS=3556493168" \
+    abc "Error: WORKSHOP_IDS has entries that are not workshop IDs: 'abc'. Write only the IDs, separated by ';'." \
+    '123;x' "Error: WORKSHOP_IDS has entries that are not workshop IDs: 'x'. Write only the IDs, separated by ';'." \
+    'x123;12a' "Error: WORKSHOP_IDS has entries that are not workshop IDs: 'x123', '12a'. Write only the IDs, separated by ';'." \
+    ' 12a ; b c ;456' "Error: WORKSHOP_IDS has entries that are not workshop IDs: '12a', 'b c'. Write only the IDs, separated by ';', such as WORKSHOP_IDS=12"
+}
+
 mod_file() {
   # $1 = path in the workshop content dir; the content comes from stdin
   local file="${STEAMAPPDIR}/steamapps/workshop/content/108600/$1"
@@ -653,7 +663,7 @@ test_list_mods() {
   TEST=list-mods
   new_env
   fake_steam
-  local out="${WORK}/mods.json" multi="101/mods/Multi Version"
+  local out="${WORK}/mods.json" multi="101/mods/Multi Version" value error
   export FAKE_GAME_VERSION=42.21.0
   # Item 101 has a Build 41 mod.info, Build 42 versions up to one newer than the game, a folder that is
   # no version, and a second mod. Item 102 only has Build 41 and a folder that is no version, items 106
@@ -842,6 +852,19 @@ EOF
   jq -e '.items == [] and .collections == [] and .workshopIds == []' "${out}" > /dev/null || fail "list-mods without items printed $(cat "${out}")"
   [ -f "${HOMEDIR}/steam-calls" ] && fail "list-mods called the Steam API without items"
 
+  # An entry of WORKSHOP_IDS that is no workshop ID fails before anything is looked up.
+  while IFS=$'\t' read -r value error; do
+    (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS="${value}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err")
+    expect_eq "$?" 1
+    expect_eq "$(cat "${WORK}/err")" "${error}"
+    [ -s "${out}" ] && fail "list-mods printed output for WORKSHOP_IDS='${value}'"
+  done < <(bad_workshop_ids)
+  [ -f "${HOMEDIR}/steam-calls" ] && fail "list-mods called the Steam API for entries that are no workshop IDs"
+  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 123 ; 456 ' bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed on IDs with spaces around them"
+  expect_eq "$(jq -c .workshopIds "${out}")" '["123","456"]'
+  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='' bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed on an empty WORKSHOP_IDS"
+  expect_eq "$(jq -c .workshopIds "${out}")" '[]'
+
   (PATH="${WORK}/bin:${PATH}" FAKE_STEAM_DOWN=1 WORKSHOP_IDS=900 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without the Steam API"
   [ -s "${out}" ] && fail "list-mods printed output without the Steam API"
   grep -q '^Error: could not resolve WORKSHOP_IDS' "${WORK}/err" || fail "the Steam API failure was not explained"
@@ -854,6 +877,8 @@ EOF
   (PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded without a game version"
   [ -s "${out}" ] && fail "list-mods printed output without a game version"
   expect_eq "$(cat "${WORK}/err")" 'Error: could not read the game version from the game files: zombie/core/Core.class has no int constant buildVersion'
+  (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=abc bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") && fail "list-mods succeeded with WORKSHOP_IDS=abc"
+  expect_eq "$(cat "${WORK}/err")" "Error: WORKSHOP_IDS has entries that are not workshop IDs: 'abc'. Write only the IDs, separated by ';'."
 }
 
 fake_paste() {
@@ -2062,7 +2087,7 @@ while IFS= read -r line; do
 done
 EOF
   chmod +x "${STEAMAPPDIR}/start-server.sh"
-  local log="${WORK}/entry.log" pid status
+  local log="${WORK}/entry.log" pid status value error
   start_entry() {
     # $@ = variables for this start. A ready file left by a run that was killed would pass the health
     # check at once.
@@ -2158,6 +2183,35 @@ EOF
   expect_eq "$?" 1
   expect_eq "$(cat "${log}")" "Error: MOD_UPDATE_CHECK=15 is not a duration such as 30s, 15m or 1h. Leave it empty to turn the check off."
   [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "the game was updated with an invalid MOD_UPDATE_CHECK"
+
+  # So does an entry of WORKSHOP_IDS that is no workshop ID, before the Steam API is called or the INI changed.
+  fake_steam
+  cp "${SERVER}/pzserver.ini" "${WORK}/ini"
+  while IFS=$'\t' read -r value error; do
+    (cd "${WORK}" && PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS="${value}" exec timeout 10 bash "${SCRIPT_DIR}/entry.sh") > "${log}" 2>&1
+    expect_eq "$?" 1
+    expect_eq "$(cat "${log}")" "${error}"
+  done < <(bad_workshop_ids)
+  [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "the game was updated with entries of WORKSHOP_IDS that are no workshop IDs"
+  [ -f "${HOMEDIR}/steam-calls" ] && fail "the Steam API was called for entries of WORKSHOP_IDS that are no workshop IDs"
+  cmp -s "${SERVER}/pzserver.ini" "${WORK}/ini" || fail "the INI changed with entries of WORKSHOP_IDS that are no workshop IDs"
+
+  # IDs with spaces around them start; an unset WORKSHOP_IDS keeps WorkshopItems and an empty one clears it.
+  start_entry PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 123 ; 456 '
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=123;456'
+  kill -TERM "${pid}"
+  wait "${pid}"
+  expect_eq "$?" 0
+  start_entry PATH="${WORK}/bin:${PATH}"
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems=123;456'
+  kill -TERM "${pid}"
+  wait "${pid}"
+  expect_eq "$?" 0
+  start_entry PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=
+  expect_line "${SERVER}/pzserver.ini" 'WorkshopItems='
+  kill -TERM "${pid}"
+  wait "${pid}"
+  expect_eq "$?" 0
 }
 
 for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_game test_update_check test_entry; do

@@ -48,6 +48,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # shellcheck source=scripts/lib/game.sh
 . "${SCRIPT_DIR}/lib/game.sh"
 
+check_workshop_ids || exit 1
+
 content_dir="${STEAMAPPDIR}/steamapps/workshop/content/108600"
 ini_file="${HOMEDIR}/Zomboid/Server/${SERVERNAME:-pzserver}.ini"
 tmp="$(mktemp -d)"
