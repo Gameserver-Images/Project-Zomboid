@@ -931,9 +931,11 @@ test_list_mods_upload() {
   make_mod 101 Upload UploadMod 42 "Upload Map"
   set_ini_value "${SERVER}/pzserver.ini" WorkshopItems 101
   set_ini_value "${SERVER}/pzserver.ini" RCONPassword rcon-secret
-  local plain="${WORK}/plain.json" out="${WORK}/out" err="${WORK}/err" code args target answer arguments words
+  local plain="${WORK}/plain.json" out="${WORK}/out" err="${WORK}/err" code args target answer arguments words value
   local own='https://bytebin.example.com:8443/paste'
-  export MODS_PAGE='https://pages.example.com/pz/mods.html'
+  # As in a released image
+  export MODS_PAGE='https://pages.example.com/pz/mods.html' IMAGE_SOURCE='https://git.example.com/owner/repo'
+  local agent="[-A] [project-zomboid-list-mods (${IMAGE_SOURCE})]"
   list_mods() {
     rm -f "${HOMEDIR}/paste-calls" "${HOMEDIR}/paste-args" "${HOMEDIR}/paste-body" "${HOMEDIR}/steam-calls"
     PATH="${WORK}/paste-bin:${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" "$@" > "${out}" 2> "${err}"
@@ -943,7 +945,7 @@ test_list_mods_upload() {
   expect_request() {
     # $@ = the arguments the upload needs, as "[arg] [value]"
     local expected
-    for expected in '[-A] [project-zomboid-list-mods]' '[-sS]' '[--connect-timeout] [15]' '[--max-time] [120]' "$@"; do
+    for expected in "${agent}" '[-sS]' '[--connect-timeout] [15]' '[--max-time] [120]' "$@"; do
       [[ "${args}" == *"${expected}"* ]] || fail "the upload had no ${expected}: ${args}"
     done
     expect_eq "$(cat "${HOMEDIR}/paste-calls")" "${1:1:-1}"
@@ -1011,21 +1013,27 @@ EOF
   FAKE_PASTE_STATUS=200 FAKE_PASTE_ANSWER='{"key":"Ab12Cd"}' list_mods --upload "${own}"
   expect_uploaded 'bytebin.example.com:8443, whose settings decide when it is deleted' "${own}/Ab12Cd"
 
-  # Without MODS_PAGE, as in an image built without it, there is only the file's link.
-  for MODS_PAGE in '' unset; do
-    [ "${MODS_PAGE}" = unset ] && unset MODS_PAGE
+  list_mods --help
+  expect_eq "$(sed -n '2p;6p' "${out}")" "$(printf '%s\n' "Prints the file the mods page (${MODS_PAGE}) loads:" \
+    '                  to it and one that opens it on the mods page')"
+
+  # In an image built without the build values, there is only the file's link and the User-Agent names only the tool.
+  for value in '' unset; do
+    export MODS_PAGE="${value}" IMAGE_SOURCE="${value}"
+    [ "${value}" = unset ] && unset MODS_PAGE IMAGE_SOURCE
+    agent='[-A] [project-zomboid-list-mods]'
     list_mods --upload
+    expect_request '[https://api.pastes.dev/post]'
     expect_eq "${code}" 0
     expect_eq "$(cat "${out}")" "$(printf '%s\n' 'Uploaded to pastes.dev, which keeps it for good; nobody can delete it. MODS_PAGE is not set, so here is the file alone, to save and load on the mods page:' \
       https://api.pastes.dev/Ab12Cd \
       'Anyone with the link can read the mod list, the sandbox settings and the few server settings the mods page uses; passwords, tokens and the like are left out.')"
     [ -s "${err}" ] && fail "the upload wrote to stderr: $(cat "${err}")"
     list_mods --help
-    expect_eq "$(sed -n 2p "${out}")" 'Prints the file the mods page loads:'
+    expect_eq "$(sed -n '2p;6p' "${out}")" "$(printf '%s\n' 'Prints the file the mods page loads:' '                  to it')"
   done
-  export MODS_PAGE='https://pages.example.com/pz/mods.html'
-  list_mods --help
-  expect_eq "$(sed -n 2p "${out}")" "Prints the file the mods page (${MODS_PAGE}) loads:"
+  export MODS_PAGE='https://pages.example.com/pz/mods.html' IMAGE_SOURCE='https://git.example.com/owner/repo'
+  agent="[-A] [project-zomboid-list-mods (${IMAGE_SOURCE})]"
 
   # Failures name the host and why, are not retried and print nothing on stdout. What the host answers
   # stays on one line without control characters.
@@ -1903,7 +1911,7 @@ ${run}/4"
   local theirs=$'Mine\n\n<!-- canaries {"42.19":{"finding":"x","label":"x","result":"fired","run":"x"},"legacy41":{"finding":"x","label":"x","result":"fired","run":"x"},"public":{"finding":"x","label":"x","result":"fired","run":"x"}} -->'
   jq --arg theirs "${theirs}" '. + [{number: 2, title: "File watcher workaround can be removed", state: "OPEN", body: "Older", author: {is_bot: true, login: "app/github-actions"}},
       {number: 3, title: "File watcher workaround can be removed", state: "CLOSED", body: "Closed by hand", author: {is_bot: true, login: "app/github-actions"}},
-      {number: 4, title: "File watcher workaround can be removed", state: "OPEN", body: $theirs, author: {is_bot: false, login: "marty"}}]
+      {number: 4, title: "File watcher workaround can be removed", state: "OPEN", body: $theirs, author: {is_bot: false, login: "alice"}}]
     | map(if .number == 1 then .body |= gsub("\n"; "\r\n") + "\r\n" else . end)' "${gh}/issues.json" > "${gh}/new"
   mv "${gh}/new" "${gh}/issues.json"
   : > "${gh}/calls"
@@ -1926,6 +1934,31 @@ ${run}/7"
   expect_eq "$(jq length "${gh}/issues.json")" 4
 }
 
+# The docs site from ci/build_site.sh, with no live site to copy env references from.
+test_build_site() {
+  TEST='build site'
+  local site="${WORK}/site" copy="${WORK}/copy" page
+  mkdir -p "${WORK}/site-bin" "${copy}"
+  printf '#!/bin/bash\nprintf 404\n' > "${WORK}/site-bin/curl"
+  chmod +x "${WORK}/site-bin/curl"
+  build_site() {
+    # $1 = the folder with the site/ to build from
+    rm -rf "${site}"
+    (cd "$1" && PATH="${WORK}/site-bin:${PATH}" bash "${REPO}/ci/build_site.sh" "${site}" https://pages.example.com/pz ghcr.io/some-fork/pz) > "${WORK}/out" 2>&1
+  }
+  build_site "${REPO}" || fail "the site build failed: $(cat "${WORK}/out")"
+  for page in index.html mods.html; do
+    grep -qF '<code>ghcr.io/some-fork/pz</code> image' "${site}/${page}" || fail "${page} doesn't name the image"
+    grep -qF '&lt;owner&gt;' "${site}/${page}" && fail "${page} kept the placeholder"
+  done
+  expect_eq "$(jq -c . "${site}/env/index.json")" '{"files":[]}'
+  # A page without the placeholder would show no image name, or another one.
+  cp -r "${REPO}/site" "${copy}/"
+  sed -i 's|ghcr\.io/&lt;owner&gt;/&lt;repo&gt;|ghcr.io/other-owner/other-image|' "${copy}/site/mods.html"
+  build_site "${copy}" && fail "the site build took a page without the placeholder"
+  expect_eq "$(cat "${WORK}/out")" 'Error: site/mods.html has no ghcr.io/&lt;owner&gt;/&lt;repo&gt; to put the image name in'
+}
+
 test_vars_documented() {
   TEST=vars
   local name
@@ -1934,7 +1967,7 @@ test_vars_documented() {
   done < "${SCRIPT_DIR}/vars.tsv"
   for name in $(grep -rhoE '\$\{[A-Z][A-Z0-9_]+(:-|\+x|\})' "${SCRIPT_DIR}" | grep -oE '[A-Z][A-Z0-9_]+' | sort -u); do
     case "${name}" in
-      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
+      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|IMAGE_SOURCE|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
     esac
     grep -q "^${name}	" "${SCRIPT_DIR}/vars.tsv" || fail "${name} is read but not in vars.tsv"
   done
@@ -2231,7 +2264,7 @@ EOF
   expect_eq "$?" 0
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

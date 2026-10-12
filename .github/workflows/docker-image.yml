@@ -167,16 +167,24 @@ jobs:
       - name: Build image
         if: needs.prepare.outputs.publish == 'true'
         run: |
+          mods_page="${SITE_URL}/mods.html"
+          repository="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           docker buildx build \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
-            --build-arg MODS_PAGE="${SITE_URL}/mods.html" \
+            --build-arg MODS_PAGE="${mods_page}" \
+            --build-arg IMAGE_SOURCE="${repository}" \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
-            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.source="${repository}" \
             --label org.opencontainers.image.version="${RELEASE}" \
             --tag "${LOCAL_IMAGE}" \
             --load \
             .
+          # A build argument only reaches the scripts through the Dockerfile's ENV.
+          image_env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${LOCAL_IMAGE}")"
+          for expected in "MODS_PAGE=${mods_page}" "IMAGE_SOURCE=${repository}"; do
+            grep -qxF "${expected}" <<< "${image_env}" || { echo "Error: the image has no ${expected}" >&2; exit 1; }
+          done
 
       - name: Pull the release
         if: needs.prepare.outputs.publish != 'true'
@@ -277,7 +285,9 @@ jobs:
         uses: actions/configure-pages@v6
 
       - name: Assemble site
-        run: bash ci/build_site.sh _site "${{ steps.pages.outputs.base_url }}" "ghcr.io/${GITHUB_REPOSITORY,,}"
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: bash ci/build_site.sh _site "${SITE_URL}" "ghcr.io/${GITHUB_REPOSITORY,,}"
 
       # A re-run keeps the artifacts of earlier attempts, and deploy-pages refuses two with one name.
       - name: Upload Pages artifact

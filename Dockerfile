@@ -43,9 +43,10 @@ RUN mkdir -p "${STEAMAPPDIR}" "${HOMEDIR}/Zomboid" \
 COPY --chmod=755 scripts /server/scripts
 COPY --from=shim /src/no_file_watcher.so /usr/local/lib/no_file_watcher.so
 COPY --from=version /src/read_game_version.jar /usr/local/lib/read_game_version.jar
-# The release workflow passes the mods page of its docs site.
+# The release workflow passes the mods page of its docs site and the URL of its repository.
 ARG MODS_PAGE=""
-ENV MODS_PAGE="${MODS_PAGE}"
+ARG IMAGE_SOURCE=""
+ENV MODS_PAGE="${MODS_PAGE}" IMAGE_SOURCE="${IMAGE_SOURCE}"
 # image-env lists the variables the image sets itself, so startup can warn about unknown ones.
 RUN ln -s /server/scripts/list_env.sh /usr/local/bin/list-env \
   && ln -s /server/scripts/list_mods.sh /usr/local/bin/list-mods \

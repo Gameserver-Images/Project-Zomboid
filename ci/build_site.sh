@@ -13,6 +13,7 @@ env_dir="${site}/env"
 mkdir -p "${env_dir}"
 for page in index.html mods.html; do
   sed "s|ghcr\.io/&lt;owner&gt;/&lt;repo&gt;|${image}|g" "site/${page}" > "${site}/${page}"
+  grep -qF "${image}" "${site}/${page}" || { echo "Error: site/${page} has no ghcr.io/&lt;owner&gt;/&lt;repo&gt; to put the image name in" >&2; exit 1; }
 done
 
 live_index="$(mktemp)"

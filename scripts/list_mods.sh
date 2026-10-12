@@ -24,7 +24,7 @@ Prints the file the mods page${MODS_PAGE:+ (${MODS_PAGE})} loads:
 your workshop items, their mods, maps and sandbox options, and the few server settings the page uses.
 On the host: docker exec <container> list-mods > mods.json
   --upload        uploads it to pastes.dev instead, which keeps it for good, and prints a link
-                  that opens it on the mods page
+                  to it${MODS_PAGE:+ and one that opens it on the mods page}
   --upload <url>  uploads it to your own bytebin server at that https URL instead
 The other commands are list-env and console; each takes --help.
 EOF
@@ -339,8 +339,9 @@ upload_error() {
 
 gzip -9 < "${tmp}/mods.json" > "${tmp}/mods.json.gz"
 : > "${tmp}/answer"
+user_agent="project-zomboid-list-mods${IMAGE_SOURCE:+ (${IMAGE_SOURCE})}"
 # Bytebin serves the file with the Content-Encoding it got, so browsers decompress it.
-if ! status="$(curl -sS --connect-timeout 15 --max-time 120 -A project-zomboid-list-mods -o "${tmp}/answer" -w '%{http_code}' \
+if ! status="$(curl -sS --connect-timeout 15 --max-time 120 -A "${user_agent}" -o "${tmp}/answer" -w '%{http_code}' \
   -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary "@${tmp}/mods.json.gz" "${base}/post" \
   2> "${tmp}/curl-error")"; then
   upload_error "$(head -n 1 "${tmp}/curl-error" | sed 's/^curl: ([0-9]*) //')"
