@@ -277,8 +277,11 @@ jq -n -c \
   | ($required | map(.response.publishedfiledetails // [] | .[]) | INDEX(.publishedfileid)) as $required
   | ($downloaded | lines | map({key: ., value: true}) | from_entries) as $downloaded
 
+  # Defaults as the game reads them: strings as written, empty too, and booleans true only when they say true in any case.
   | def sandbox($labels):
-      {env, option, type, default: (.default | text), min: (.min | text), max: (.max | text),
+      {env, option, type,
+       default: (if .type == "string" then .default elif .type == "boolean" then .default | ascii_downcase == "true" | tostring else .default | text end),
+       min: (.min | text), max: (.max | text),
        values: (if .type == "enum" and .valueTranslation != "" then
            .valueTranslation as $values
            | [range(1; [(.numValues | number // 0 | floor), 1000] | min + 1) as $i | $labels["Sandbox_\($values)_option\($i)"]]

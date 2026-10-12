@@ -748,6 +748,10 @@ option Loose.Word { type = double, min = 0, max = 1, default = half, }
 option Loose.NoValues { type = enum, numValues = 0, default = 1, }
 option Loose.Last { type = string, default = a }
 option Loose.Number { type = double, min = -1, max = 1e3, default = .5, }
+option Loose.Empty { type = string, default = , }
+option Loose.Unset { type = boolean, default = , }
+option Loose.Upper { type = boolean, default = TRUE, }
+option Loose.Yes { type = boolean, default = yes, }
 option Loose.Str { type = string, default = a b , page = P,}, option Loose.Skipped { type = boolean, default = true, }
 option Loose.After { type = boolean, default = true, }
 EOF
@@ -816,7 +820,7 @@ EOF
   expect_eq "$(jq -c '.items[6].mods | map([.id, .versionFolder, .error, .require, .requireEntries, .maps, (.sandbox | length)])' "${out}")" \
     '[["BadMod","42","its mod.info has versionMin=42, which is not a major.minor version like 42.13",[],[],["Bad Map"],0],["CappedMod","42",null,[],[],["Capped Map"],0],["SpacesMod","42",null,["A","B"],["A"," B"],["Spaces Map"],0]]'
   expect_eq "$(jq -c '.items[5].mods[0] | [.versionFolder, (.sandbox | map([.option, .type, .default, .min, .max, .page]))]' "${out}")" \
-    '["42.5",[["Loose.Spaced","boolean","true",null,null,null],["Loose.Twice","boolean","true",null,null,null],["Loose.Number","double",".5","-1","1e3",null],["Loose.Str","string","a b",null,null,"P"]]]'
+    '["42.5",[["Loose.Spaced","boolean","true",null,null,null],["Loose.Twice","boolean","true",null,null,null],["Loose.Number","double",".5","-1","1e3",null],["Loose.Empty","string","",null,null,null],["Loose.Unset","boolean","false",null,null,null],["Loose.Upper","boolean","true",null,null,null],["Loose.Yes","boolean","false",null,null,null],["Loose.Str","string","a b",null,null,"P"]]]'
   expect_eq "$(jq -c '.items[5].mods[2].sandbox' "${out}")" '[]'
   expect_eq "$(jq -c '.items[5].mods[1] | [.id, .versionFolder, .maps, [.sandbox[].env]]' "${out}")" '[null,"42",["No Id Map"],["SANDBOX_NoId__X"]]'
   [ -s "${WORK}/err" ] && fail "list-mods wrote to stderr: $(cat "${WORK}/err")"
