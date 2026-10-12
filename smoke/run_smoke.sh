@@ -932,8 +932,8 @@ test_list_mods_upload() {
   set_ini_value "${SERVER}/pzserver.ini" WorkshopItems 101
   set_ini_value "${SERVER}/pzserver.ini" RCONPassword rcon-secret
   local plain="${WORK}/plain.json" out="${WORK}/out" err="${WORK}/err" code args target answer arguments words
-  local page='https://gameserver-images.github.io/Project-Zomboid/mods.html#url=' own='https://bytebin.example.com:8443/paste'
-  local agent='[-A] [project-zomboid-list-mods (github.com/Gameserver-Images/Project-Zomboid)]'
+  local own='https://bytebin.example.com:8443/paste'
+  export MODS_PAGE='https://pages.example.com/pz/mods.html'
   list_mods() {
     rm -f "${HOMEDIR}/paste-calls" "${HOMEDIR}/paste-args" "${HOMEDIR}/paste-body" "${HOMEDIR}/steam-calls"
     PATH="${WORK}/paste-bin:${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" "$@" > "${out}" 2> "${err}"
@@ -943,7 +943,7 @@ test_list_mods_upload() {
   expect_request() {
     # $@ = the arguments the upload needs, as "[arg] [value]"
     local expected
-    for expected in "${agent}" '[-sS]' '[--connect-timeout] [15]' '[--max-time] [120]' "$@"; do
+    for expected in '[-A] [project-zomboid-list-mods]' '[-sS]' '[--connect-timeout] [15]' '[--max-time] [120]' "$@"; do
       [[ "${args}" == *"${expected}"* ]] || fail "the upload had no ${expected}: ${args}"
     done
     expect_eq "$(cat "${HOMEDIR}/paste-calls")" "${1:1:-1}"
@@ -952,7 +952,7 @@ test_list_mods_upload() {
   expect_uploaded() {
     # $1 = the host and when it deletes the file, $2 = the file's URL
     expect_eq "${code}" 0
-    expect_eq "$(cat "${out}")" "$(printf '%s\n' "Uploaded to $1. Open this link to load it on the mods page:" "${page}$2" \
+    expect_eq "$(cat "${out}")" "$(printf '%s\n' "Uploaded to $1. Open this link to load it on the mods page:" "${MODS_PAGE}#url=$2" \
       'The file alone, to load by hand:' "$2" \
       'Anyone with the link can read the mod list, the sandbox settings and the few server settings the mods page uses; passwords, tokens and the like are left out.')"
     [ -s "${err}" ] && fail "the upload wrote to stderr: $(cat "${err}")"
@@ -1010,6 +1010,22 @@ EOF
   # Any 2xx is a success, such as a 200 from a proxy in front of your own bytebin.
   FAKE_PASTE_STATUS=200 FAKE_PASTE_ANSWER='{"key":"Ab12Cd"}' list_mods --upload "${own}"
   expect_uploaded 'bytebin.example.com:8443, whose settings decide when it is deleted' "${own}/Ab12Cd"
+
+  # Without MODS_PAGE, as in an image built without it, there is only the file's link.
+  for MODS_PAGE in '' unset; do
+    [ "${MODS_PAGE}" = unset ] && unset MODS_PAGE
+    list_mods --upload
+    expect_eq "${code}" 0
+    expect_eq "$(cat "${out}")" "$(printf '%s\n' 'Uploaded to pastes.dev, which keeps it for good; nobody can delete it. MODS_PAGE is not set, so here is the file alone, to save and load on the mods page:' \
+      https://api.pastes.dev/Ab12Cd \
+      'Anyone with the link can read the mod list, the sandbox settings and the few server settings the mods page uses; passwords, tokens and the like are left out.')"
+    [ -s "${err}" ] && fail "the upload wrote to stderr: $(cat "${err}")"
+    list_mods --help
+    expect_eq "$(sed -n 2p "${out}")" 'Prints the file the mods page loads:'
+  done
+  export MODS_PAGE='https://pages.example.com/pz/mods.html'
+  list_mods --help
+  expect_eq "$(sed -n 2p "${out}")" "Prints the file the mods page (${MODS_PAGE}) loads:"
 
   # Failures name the host and why, are not retried and print nothing on stdout. What the host answers
   # stays on one line without control characters.
@@ -1409,7 +1425,7 @@ test_unrecognized() {
   new_env
   # Everything the test runner itself exports counts as the image's own, except what bash adds.
   compgen -e | grep -vxE 'OLDPWD|PWD|SHLVL' > "${WORK}/image-env"
-  export PASSWORD=x ini__pzserver__Public=true MEMORY=4g INI_Public=true http_proxy=x TZ=UTC
+  export PASSWORD=x ini__pzserver__Public=true MEMORY=4g INI_Public=true http_proxy=x TZ=UTC IMAGE=x EXTRA_LOCALES=x
   report_unrecognized "${WORK}/image-env" 2> "${WORK}/err"
   grep -q 'does not read PASSWORD ini__pzserver__Public\.' "${WORK}/err" || { fail "unknown variables were not reported as expected"; cat "${WORK}/err" >&2; }
   unset PASSWORD ini__pzserver__Public
@@ -2023,15 +2039,15 @@ test_update_check() {
       "         The message on their screen names the first file that differs. \"File doesn't exist on the client\" followed by where that file is on their PC means they have it but load" \
       "         their mods in another order, which happens when something on their PC reorders mods: ask them what, then put the mods it moves first in INI_Mods, in its order, or have them turn that off."
   }
-  local kick42='WARN : Multiplayer  f:0 st:17,631,141,550 at ChecksumPacket.parseServer          > user Zexyqag will be kicked in 60000ms because Lua/script checksums do not match'
-  local kick42later='WARN : Multiplayer  f:0 st:17,631,201,550 at ChecksumPacket.parseServer          > user Zexyqag will be kicked in 60000ms because Lua/script checksums do not match'
+  local kick42='WARN : Multiplayer  f:0 st:17,631,141,550 at ChecksumPacket.parseServer          > user Alice will be kicked in 60000ms because Lua/script checksums do not match'
+  local kick42later='WARN : Multiplayer  f:0 st:17,631,201,550 at ChecksumPacket.parseServer          > user Alice will be kicked in 60000ms because Lua/script checksums do not match'
   local kick42b='WARN : Multiplayer  f:0 st:17,631,152,004 at ChecksumPacket.parseServer          > user Second will be kicked in 60000ms because Lua/script checksums do not match'
   local kick4213='LOG  : General      f:0, t:1759800000000, st:1,234,567> user Old Timer will be kicked because Lua/script checksums do not match'
   local kick41='LOG  : General     , 1759800000000> 1,234,567> user B41 will be kicked because Lua/script checksums do not match'
   # Build 41 writes the server time in the server's locale, such as de_DE's or fr_FR's (U+202F between the groups).
   local kick41de='LOG  : General     , 1759800000000> 1.234.567> user B41de will be kicked because Lua/script checksums do not match'
   local kick41fr="LOG  : General     , 1759800000000> 1"$'\xe2\x80\xaf'"234"$'\xe2\x80\xaf'"567> user B41fr will be kicked because Lua/script checksums do not match"
-  local cheat='WARN : Multiplayer  f:0 st:17,631,141,551 at AntiCheat.log                     > Anti-cheat="ChecksumUpdate" is triggered for connection="Zexyqag" server-option="AntiCheatChecksum" reason="Lua incorrect checksum" counter=1/1 action="Kick" ping=42'
+  local cheat='WARN : Multiplayer  f:0 st:17,631,141,551 at AntiCheat.log                     > Anti-cheat="ChecksumUpdate" is triggered for connection="Alice" server-option="AntiCheatChecksum" reason="Lua incorrect checksum" counter=1/1 action="Kick" ping=42'
   local others=('LOG  : General      f:0, t:1759800000000, st:1,234,568> command entered via server console (System.in): "servermsg > user Fake will be kicked because Lua/script checksums do not match"'
     'LOG  : General      f:0, t:1759800000000, st:1,234,569> Fake said > user Fake will be kicked because Lua/script checksums do not match'
     'LOG  : General      f:0, t:1759800000000, st:1,234,569> Fake> user Fake will be kicked because Lua/script checksums do not match'
@@ -2040,7 +2056,7 @@ test_update_check() {
   expect_eq "$(cat "${WORK}/out")" "${cheat}"
   printf '%s\n' "${kick42}" "${cheat}" "${kick42later}" "${kick42b}" "${kick4213}" "${kick41}" "${kick41de}" "${kick41fr}" "${kick42b}" "${others[@]}" \
     | follow_output "${WORK}/ready" "${console}" "" > "${WORK}/out"
-  expect_eq "$(cat "${WORK}/out")" "$(printf '%s\n' "${kick42}"; kick_hint Zexyqag; printf '%s\n' "${cheat}" "${kick42later}" "${kick42b}"; kick_hint Second
+  expect_eq "$(cat "${WORK}/out")" "$(printf '%s\n' "${kick42}"; kick_hint Alice; printf '%s\n' "${cheat}" "${kick42later}" "${kick42b}"; kick_hint Second
     printf '%s\n' "${kick4213}"; kick_hint 'Old Timer'; printf '%s\n' "${kick41}"; kick_hint B41; printf '%s\n' "${kick41de}"; kick_hint B41de
     printf '%s\n' "${kick41fr}"; kick_hint B41fr; printf '%s\n' "${kick42b}" "${others[@]}")"
   # Without a player count the check is due again after the interval.

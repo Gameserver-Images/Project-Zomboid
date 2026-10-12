@@ -1,6 +1,6 @@
 services:
   ProjectZomboidDedicatedServer:
-    image: ghcr.io/gameserver-images/project-zomboid:1
+    image: ${IMAGE:-ghcr.io/gameserver-images/project-zomboid:1}
     restart: unless-stopped
     # Saving a large world on shutdown takes longer than Docker's default 10s.
     stop_grace_period: 120s

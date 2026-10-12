@@ -5,13 +5,10 @@
 # INI settings the mods page uses. The values of passwords, tokens, webhooks, Discord and RCON settings and
 # the announced IP stay out, mods' sandbox options included.
 # --upload sends it gzipped to pastes.dev, which keeps it for good, or to the bytebin server at that URL,
-# and prints a mods page link that loads it.
+# and prints a link to it on the mods page at MODS_PAGE.
 
 set -euo pipefail
 shopt -s nullglob
-
-mods_page='https://gameserver-images.github.io/Project-Zomboid/mods.html'
-user_agent='project-zomboid-list-mods (github.com/Gameserver-Images/Project-Zomboid)'
 
 usage='Usage: list-mods [--upload [https://<your bytebin>]]'
 
@@ -23,7 +20,7 @@ case "$#:${1:-}" in
   1:-h | 1:--help)
     cat <<EOF
 ${usage}
-Prints the file the mods page loads (${mods_page}):
+Prints the file the mods page${MODS_PAGE:+ (${MODS_PAGE})} loads:
 your workshop items, their mods, maps and sandbox options, and the few server settings the page uses.
 On the host: docker exec <container> list-mods > mods.json
   --upload        uploads it to pastes.dev instead, which keeps it for good, and prints a link
@@ -343,7 +340,7 @@ upload_error() {
 gzip -9 < "${tmp}/mods.json" > "${tmp}/mods.json.gz"
 : > "${tmp}/answer"
 # Bytebin serves the file with the Content-Encoding it got, so browsers decompress it.
-if ! status="$(curl -sS --connect-timeout 15 --max-time 120 -A "${user_agent}" -o "${tmp}/answer" -w '%{http_code}' \
+if ! status="$(curl -sS --connect-timeout 15 --max-time 120 -A project-zomboid-list-mods -o "${tmp}/answer" -w '%{http_code}' \
   -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary "@${tmp}/mods.json.gz" "${base}/post" \
   2> "${tmp}/curl-error")"; then
   upload_error "$(head -n 1 "${tmp}/curl-error" | sed 's/^curl: ([0-9]*) //')"
@@ -357,8 +354,12 @@ if ! key="$(jq -c .key "${tmp}/answer" 2> /dev/null)" || ! [[ "${key}" =~ ^\"([A
 fi
 url="${base}/${BASH_REMATCH[1]}"
 
-echo "Uploaded to ${host}, ${deleted}. Open this link to load it on the mods page:"
-echo "${mods_page}#url=${url}"
-echo "The file alone, to load by hand:"
+if [ -n "${MODS_PAGE:-}" ]; then
+  echo "Uploaded to ${host}, ${deleted}. Open this link to load it on the mods page:"
+  echo "${MODS_PAGE}#url=${url}"
+  echo "The file alone, to load by hand:"
+else
+  echo "Uploaded to ${host}, ${deleted}. MODS_PAGE is not set, so here is the file alone, to save and load on the mods page:"
+fi
 echo "${url}"
 echo "Anyone with the link can read the mod list, the sandbox settings and the few server settings the mods page uses; passwords, tokens and the like are left out."

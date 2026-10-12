@@ -225,7 +225,8 @@ report_unrecognized() {
   # $1 = file listing the variables the image sets itself
   local image_env="$1" known unrecognized
   [ -f "${image_env}" ] || return 0
-  known="$(cut -f1 "${SCRIPT_DIR}/vars.tsv"; cat "${image_env}"; printf '%s\n' HOSTNAME HOME OLDPWD PATH PWD SHLVL TERM TZ HTTP_PROXY HTTPS_PROXY NO_PROXY)"
+  # docker-compose.yml reads IMAGE and EXTRA_LOCALES from the .env file it also passes to the container.
+  known="$(cut -f1 "${SCRIPT_DIR}/vars.tsv"; cat "${image_env}"; printf '%s\n' HOSTNAME HOME OLDPWD PATH PWD SHLVL TERM TZ HTTP_PROXY HTTPS_PROXY NO_PROXY IMAGE EXTRA_LOCALES)"
   unrecognized="$(compgen -e | grep -vE '^(INI|SANDBOX)_|^[a-z_][a-z0-9_]*$|_SERVICE_(HOST|PORT)|_PORT_[0-9]+_|^KUBERNETES_' \
     | grep -vxF -f <(printf '%s\n' "${known}") | paste -sd ' ' || true)"
   [ -z "${unrecognized}" ] || echo "Warning: this image does not read ${unrecognized}. Run 'docker exec <container> list-env' to see the valid names." >&2

@@ -68,6 +68,7 @@ jobs:
       release: ${{ steps.plan.outputs.release }}
       publish: ${{ steps.plan.outputs.publish }}
       notes: ${{ steps.plan.outputs.notes }}
+      site: ${{ steps.pages.outputs.base_url }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -147,6 +148,7 @@ jobs:
     env:
       LOCAL_IMAGE: pz-server:candidate
       RELEASE: ${{ needs.prepare.outputs.release }}
+      SITE_URL: ${{ needs.prepare.outputs.site }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -168,7 +170,9 @@ jobs:
           docker buildx build \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
+            --build-arg MODS_PAGE="${SITE_URL}/mods.html" \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.version="${RELEASE}" \
             --tag "${LOCAL_IMAGE}" \
             --load \
@@ -273,7 +277,7 @@ jobs:
         uses: actions/configure-pages@v6
 
       - name: Assemble site
-        run: bash ci/build_site.sh _site "${{ steps.pages.outputs.base_url }}"
+        run: bash ci/build_site.sh _site "${{ steps.pages.outputs.base_url }}" "ghcr.io/${GITHUB_REPOSITORY,,}"
 
       # A re-run keeps the artifacts of earlier attempts, and deploy-pages refuses two with one name.
       - name: Upload Pages artifact

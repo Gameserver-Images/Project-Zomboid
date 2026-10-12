@@ -1,15 +1,19 @@
 #!/bin/bash
-# Assembles the docs site: the pages, the env references in <site>/env, and an index of them.
-# References for earlier game builds are copied from the live site, because each deploy replaces it.
-# Usage: build_site.sh <site dir> <live site URL>
+# Assembles the docs site: the pages, with the image name filled in, the env references in <site>/env,
+# and an index of them. References for earlier game builds are copied from the live site, because each
+# deploy replaces it.
+# Usage: build_site.sh <site dir> <live site URL> <image>
 
 set -euo pipefail
 
 site="$1"
 base="$2"
+image="$3"
 env_dir="${site}/env"
 mkdir -p "${env_dir}"
-cp site/index.html site/mods.html "${site}/"
+for page in index.html mods.html; do
+  sed "s|ghcr\.io/&lt;owner&gt;/&lt;repo&gt;|${image}|g" "site/${page}" > "${site}/${page}"
+done
 
 live_index="$(mktemp)"
 status="$(curl -sS -o "${live_index}" -w '%{http_code}' "${base}/env/index.json")"
