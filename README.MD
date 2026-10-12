@@ -106,6 +106,7 @@ On a NAS that resets `/etc` on a reboot or update (Synology, Unraid), run the fi
 ## Running the server
 
 * `docker stop` (or stopping it in Portainer) makes the server save the world and quit. `stop_grace_period: 120s` gives it time for that.
+* The container has three commands: `list-env`, `list-mods` and `console`. Run them with `docker exec <container> <command>`, or in the container's console in Portainer. Each one prints its options with `--help`.
 * `docker exec <container> console <command>` sends a command to the server console, for example `console save` or `console servermsg "Restart in 5 minutes"`. The reply shows up in the container log.
 * For remote administration, set `INI_RCONPassword`, publish `27015/tcp` and use any Source RCON client.
 * The server makes its own backups: see `INI_BackupsCount`, `INI_BackupsOnStart`, `INI_BackupsPeriod` and `INI_BackupsOnVersionChange`. The last one is worth turning on, since any restart can bring a new game version.

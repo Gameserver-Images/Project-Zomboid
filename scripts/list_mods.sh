@@ -6,7 +6,6 @@
 # the announced IP stay out, mods' sandbox options included.
 # --upload sends it gzipped to pastes.dev, which keeps it for good, or to the bytebin server at that URL,
 # and prints a mods page link that loads it.
-# Usage: list-mods [--upload [https://<your bytebin>]]
 
 set -euo pipefail
 shopt -s nullglob
@@ -14,22 +13,31 @@ shopt -s nullglob
 mods_page='https://gameserver-images.github.io/Project-Zomboid/mods.html'
 user_agent='project-zomboid-list-mods (github.com/Gameserver-Images/Project-Zomboid)'
 
-usage() {
-  echo 'Usage: list-mods [--upload [https://<your bytebin>]]' >&2
-  exit 2
-}
+usage='Usage: list-mods [--upload [https://<your bytebin>]]'
 
 # https without user info, in characters the mods page link needs no escaping for.
 bytebin_url='^https://([A-Za-z0-9.-]+(:[0-9]+)?)(/[A-Za-z0-9._~-]+)*/?$'
 base=""
 case "$#:${1:-}" in
   0:) ;;
+  1:-h | 1:--help)
+    cat <<EOF
+${usage}
+Prints the file the mods page loads (${mods_page}):
+your workshop items, their mods, maps and sandbox options, and the few server settings the page uses.
+On the host: docker exec <container> list-mods > mods.json
+  --upload        uploads it to pastes.dev instead, which keeps it for good, and prints a link
+                  that opens it on the mods page
+  --upload <url>  uploads it to your own bytebin server at that https URL instead
+The other commands are list-env and console; each takes --help.
+EOF
+    exit 0 ;;
   1:--upload)
     base=https://api.pastes.dev host=pastes.dev deleted='which keeps it for good; nobody can delete it' ;;
   2:--upload)
-    [[ "$2" =~ ${bytebin_url} ]] || usage
+    [[ "$2" =~ ${bytebin_url} ]] || { echo "${usage}" >&2; exit 2; }
     base="${2%/}" host="${BASH_REMATCH[1]}" deleted='whose settings decide when it is deleted' ;;
-  *) usage ;;
+  *) echo "${usage}" >&2; exit 2 ;;
 esac
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"

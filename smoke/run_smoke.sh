@@ -1681,6 +1681,31 @@ test_list_env() {
   expect_line "${WORK}/out" "$(printf 'sandbox\tSANDBOX_ZombieLore__Mortality\t5\tDefault = Instant')"
 }
 
+# Each command explains itself with --help or -h, and list-env refuses what it can't take.
+test_help() {
+  TEST=help
+  new_env
+  local cmd flag status
+  for cmd in list-env:list_env list-mods:list_mods console:console; do
+    for flag in --help -h; do
+      bash "${SCRIPT_DIR}/${cmd#*:}.sh" "${flag}" > "${WORK}/out" 2> "${WORK}/err" || fail "${cmd%%:*} ${flag} failed"
+      [ -s "${WORK}/err" ] && fail "${cmd%%:*} ${flag} wrote to stderr: $(cat "${WORK}/err")"
+      [[ "$(head -n 1 "${WORK}/out")" == "Usage: ${cmd%%:*} "* ]] || fail "${cmd%%:*} ${flag} printed no usage line first"
+      grep -q 'each takes --help' "${WORK}/out" || fail "${cmd%%:*} ${flag} doesn't name the other commands"
+    done
+  done
+  refused() {
+    status=0
+    bash "${SCRIPT_DIR}/list_env.sh" "$@" > "${WORK}/out" 2> "${WORK}/err" || status=$?
+    expect_eq "${status}" 2
+    expect_eq "$(cat "${WORK}/err")" 'Usage: list-env [--tsv] [filter]'
+    [ -s "${WORK}/out" ] && fail "list-env $* printed rows"
+  }
+  refused --foo
+  refused --tsv --foo
+  refused zombie lore
+}
+
 # The issues ci/canary_issues.sh opens from the boot tests' canary results, against a fake gh.
 test_canary_issues() {
   TEST='canary issues'
@@ -2135,7 +2160,7 @@ EOF
   [ -f "${HOMEDIR}/steamcmd-calls" ] && fail "the game was updated with an invalid MOD_UPDATE_CHECK"
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_vars_documented test_canary_issues test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

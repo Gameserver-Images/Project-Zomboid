@@ -1,9 +1,24 @@
 #!/bin/bash
 # Lists every environment variable the image reads: its own variables, then one INI_ and
 # SANDBOX_ variable per setting in the server's current files, mod settings included.
-# Usage: list-env [--tsv] [filter]
 
 set -euo pipefail
+
+usage='Usage: list-env [--tsv] [filter]'
+case "${1:-}" in
+  -h | --help)
+    cat <<EOF
+${usage}
+Lists the variables you can set, with their current values: the image's own, then an INI_ and a
+SANDBOX_ variable for every setting in the server's files, mod settings included. Passwords and
+tokens show as (set).
+  filter  only the variables whose name or description contains it, in any case,
+          e.g. list-env anticheat
+  --tsv   tab-separated rows (kind, name, value, description), for scripts
+The other commands are list-mods and console; each takes --help.
+EOF
+    exit 0 ;;
+esac
 
 SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SERVER_DIR="${HOMEDIR}/Zomboid/Server"
@@ -12,6 +27,10 @@ tsv=false
 if [ "${1:-}" = "--tsv" ]; then
   tsv=true
   shift
+fi
+if [ "$#" -gt 1 ] || [[ "${1:-}" == -* ]]; then
+  echo "${usage}" >&2
+  exit 2
 fi
 filter="${1:-}"
 
