@@ -64,7 +64,7 @@ There are three kinds of variables. The [env var site](https://gameserver-images
 How they apply:
 
 * Variables are written on every start. One you remove leaves its last value in the file; set it empty to clear it.
-* Once the server has written its files (from the second start), names and values are checked against them. A name that matches no setting, or a value of the wrong type such as `INI_Public=yes`, isn't written, and the log warns about it. `CONFIG_STRICT=true` refuses to start instead. The log also warns about variables the image doesn't read at all.
+* Once the server has written its files (from the second start), names and values are checked against them; a mod's sandbox settings that the file doesn't have yet, as on the start that adds the mod, are checked against the mod's own options and added. A name that matches no setting, or a value of the wrong type such as `INI_Public=yes`, isn't written, and the log warns about it. `CONFIG_STRICT=true` refuses to start instead. The log also warns about variables the image doesn't read at all.
 * Sandbox settings apply from the second start, because the server writes its SandboxVars file on the first. `SERVERPRESET` creates that file from one of the game's presets before the first start.
 * `INI_<Key>_FILE` and `ADMINPASSWORD_FILE` read the value from a file, for Docker secrets. `list-env` shows passwords and tokens as `(set)`.
 * On/off image settings accept `1`, `true`, `yes`, `y` or `on`.

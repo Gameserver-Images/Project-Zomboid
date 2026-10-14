@@ -10,7 +10,7 @@ MOD_UPDATE_CHECK	How often the server checks the workshop items it started with 
 MODS_PAGE	The mods page that list-mods --upload links to, such as your own copy of it; empty prints only the file's link. Released images default to the one on the docs site of the repository that built them; an image you build yourself has none unless you pass --build-arg MODS_PAGE=<page>.
 SERVERPRESET	Sandbox preset (a file name in media/lua/shared/Sandbox) used to create the SandboxVars file when it does not exist.
 SERVERPRESETREPLACE	Overwrite an existing SandboxVars file with SERVERPRESET on every start (true/false).
-CONFIG_STRICT	Refuse to start when an INI_ or SANDBOX_ variable matches no setting or has a value of the wrong type (true/false).
+CONFIG_STRICT	Refuse to start when an INI_ or SANDBOX_ variable matches no setting or has a value the setting doesn't take (true/false).
 MEMORY	Java heap size, for example 4096m or 8g. Sets both -Xms and -Xmx.
 SOFTRESET	Start with a soft reset (true/false).
 DEBUG	Start the server in debug mode (true/false).

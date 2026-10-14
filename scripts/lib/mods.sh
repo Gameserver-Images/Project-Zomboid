@@ -274,6 +274,83 @@ mod_dirs() {
   }'
 }
 
+sandbox_options() {
+  # stdin = mod_info_rows output. Prints the sandbox options the game reads for these mods
+  # (CustomSandboxOptions), in its order: item/folder of the mod, sequence number, id, type, default,
+  # min, max, page, translation, valueTranslation and numValues, each trimmed.
+  local item folder dir file found=""
+  mod_dirs | while IFS=$'\t' read -r item folder _ dir; do
+    # The game reads the sandbox options of the version folder, or else those of common/.
+    file="${dir}/media/sandbox-options.txt"
+    [ -f "${file}" ] && [ "${found}" != "${item}/${folder}" ] || continue
+    printf '%s/%s\t%s\n' "${item}" "${folder}" "${file}"
+    found="${item}/${folder}"
+  done | LC_ALL=C awk -F '\t' '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function clean(s) { gsub(/\t/, " ", s); return s }
+    # Reads sandbox-options.txt like the game (ScriptParser.readBlock): the lines joined without
+    # separators, /* */ comments removed, then blocks "<type> <id> {" holding values that each end at
+    # a comma. Text before a closing brace is no value, and the character right after it is skipped.
+    # Only a file with VERSION = 1 counts, and only its option blocks before any other kind of block.
+    # Keys and types match exactly, and each type needs certain values.
+    # Java ints; the game takes the smallest one as missing.
+    function int_ok(v) { v = trim(v); return v ~ /^[+-]?[0-9]+$/ && v + 0 > -2147483648 && v + 0 <= 2147483647 }
+    function double_ok(v) { return trim(v) ~ /^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?[fFdD]?$/ }
+    function options(key, path,   line, s, i, j, n, c, start, depth, head, ss, version, stopped, id, type, field, value, out) {
+      s = ""
+      while ((getline line < path) > 0) {
+        gsub(/\r/, "", line)
+        s = s line
+      }
+      close(path)
+      while ((i = index(s, "/*")) > 0 && (j = index(substr(s, i + 2), "*/")) > 0) s = substr(s, 1, i - 1) substr(s, i + j + 3)
+      n = length(s)
+      start = 1
+      depth = 0
+      version = ""
+      stopped = 0
+      out = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "{") {
+          if (++depth == 1) {
+            head = trim(substr(s, start, i - start))
+            split(head, ss, /[ \t\n]+/)
+            if (tolower(ss[1]) != "option") stopped = 1
+            id = ss[2]
+            split("", field)
+          }
+          start = i + 1
+        } else if (c == "}") {
+          if (depth == 0) break
+          if (depth-- == 1 && !stopped && id != "") {
+            type = ("type" in field) ? trim(field["type"]) : ""
+            if ((type == "boolean" || type == "string") && ("default" in field) ||
+                type == "integer" && int_ok(field["min"]) && int_ok(field["max"]) && int_ok(field["default"]) ||
+                type == "double" && double_ok(field["min"]) && double_ok(field["max"]) && double_ok(field["default"]) ||
+                type == "enum" && int_ok(field["numValues"]) && trim(field["numValues"]) + 0 > 0 && int_ok(field["default"]) && trim(field["default"]) + 0 > 0) {
+              out = out key "\t" (++seq) "\t" clean(id) "\t" type "\t" clean(trim(field["default"])) "\t" \
+                clean(trim(field["min"])) "\t" clean(trim(field["max"])) "\t" clean(trim(field["page"])) "\t" clean(trim(field["translation"])) "\t" \
+                clean(trim(field["valueTranslation"])) "\t" clean(trim(field["numValues"])) "\n"
+            }
+          }
+          start = i + 1
+          i++
+        } else if (c == ",") {
+          value = substr(s, start, i - start)
+          if ((j = index(value, "=")) > 1) {
+            if (depth == 0 && trim(substr(value, 1, j - 1)) == "VERSION" && version == "") version = int_ok(substr(value, j + 1)) ? trim(substr(value, j + 1)) + 0 : -1
+            else if (depth == 1 && !(trim(substr(value, 1, j - 1)) in field)) field[trim(substr(value, 1, j - 1))] = substr(value, j + 1)
+          }
+          start = i + 1
+        }
+      }
+      if (version == 1) printf "%s", out
+    }
+    { options($1, $2) }
+  '
+}
+
 # Works out what the server loads from Mods= (GameServer, ZomboidFileSystem.loadMods): each entry
 # after the mods it requires, which load even when Mods= doesn't list them. The server sees the
 # items in WorkshopItems, in that order, then Zomboid/mods, which holds mods placed there by hand,

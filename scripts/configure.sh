@@ -82,7 +82,7 @@ configure_server() {
   mods="$(load_mods "${ini_file}" "${content_dir}" "${version}")"
   apply_mod_maps "${ini_file}" "${spawn_file}" "${content_dir}" "${mods}" "${version}"
   check_maps "${ini_file}" "${mods}" "${version}"
-  apply_sandbox_env "${lua_file}"
+  apply_sandbox_env "${lua_file}" "${mods}"
 
   # The admin account lives in the server database, so the password is only needed to create it.
   if [ ! -f "${db_file}" ]; then

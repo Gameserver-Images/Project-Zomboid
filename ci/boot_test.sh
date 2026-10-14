@@ -3,8 +3,9 @@
 # server, keeps settings written before its first start, creates its database and saves on
 # `docker stop`, then starts it again to check the update and the settings against the files the
 # server wrote. A first start on a new data volume with a map mod from the workshop checks that the
-# image downloads it before the server starts, so that start has its map and spawn region; on Build 42
-# a local mod in that start checks how the game's map zone loader takes a zone without x and y. The
+# image downloads it before the server starts, so that start has its map and spawn region, and that the
+# SANDBOX_ setting of a local mod applies on the start that adds the mod; on Build 42 another local
+# mod in that start checks how the game's map zone loader takes a zone without x and y. The
 # start after adds an item, which SteamCMD downloads next to one the server downloaded itself, and
 # asks the server whether its items have updates and how many players are online. Then,
 # with the host's inotify watch limit below what the game watches with a mod, it
@@ -214,12 +215,24 @@ if [[ "${version}" != 41.* ]]; then
   mods="BootZones;${map_mod}"
   map_line="BootZones;${map_line}"
 fi
+# The game writes the options of a mod into SandboxVars on the first start that loads it, so on that
+# start the image adds the option SANDBOX_ sets to the file SERVERPRESET creates. It writes the value as
+# it is set, the game as Java prints it, so 2.5 in the file shows that the game read it.
+sandbox_mod="${home}/mods/BootSandbox"
+[[ "${version}" == 41.* ]] || sandbox_mod="${sandbox_mod}/common"
+docker run --rm -v "${home_volume}:${home}" --entrypoint bash "${image}" -c \
+  'mkdir -p "$1/media" && printf "name=BootSandbox\nid=BootSandbox\n" > "$1/mod.info" \
+    && printf "%s\n" "VERSION = 1," "option BootSandbox.Rate" "{" "type = double," "min = 0," "max = 10," "default = 1," "}" > "$1/media/sandbox-options.txt"' \
+  _ "${sandbox_mod}"
+mods="${mods};BootSandbox"
 docker run -d --name "${name}" --health-interval=5s \
   -v "${game_volume}:/home/steam/pz-dedicated" -v "${home_volume}:${home}" -e GAME_BRANCH="${branch}" \
   -e GAME_UPDATE=false -e ADMINPASSWORD=boot-test -e WORKSHOP_IDS="${server_item};${map_item}" -e INI_Mods="${mods}" \
-  "${image}" >/dev/null
+  -e SERVERPRESET=Apocalypse -e SANDBOX_BootSandbox__Rate=2.50 "${image}" >/dev/null
 wait_healthy || map_failed "the server with the workshop map ${map_mod} exited before it started"
 logs="$(docker logs "${name}" 2>&1)"
+docker exec "${name}" grep -qx '        Rate = 2.5,' "${home}/Server/pzserver_SandboxVars.lua" \
+  || fail "SANDBOX_BootSandbox__Rate did not apply on the start that adds its mod. The SandboxVars lines of the mod: $(docker exec "${name}" grep -A 3 'BootSandbox = {' "${home}/Server/pzserver_SandboxVars.lua" | paste -sd ' '); the log's lines for it: $(grep -E 'BootSandbox|SANDBOX_' <<< "${logs}" | paste -sd ' ')"
 grep -q "Workshop: item state .* -> DownloadPending ID=${server_item}\$" <<< "${logs}" \
   || fail "the server did not download workshop item ${server_item} itself: $(grep "Workshop: .*${server_item}" <<< "${logs}")"
 grep -qx 'Workshop: downloaded 1 new item with SteamCMD' <<< "${logs}" \

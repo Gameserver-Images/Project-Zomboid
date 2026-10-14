@@ -85,31 +85,82 @@ apply_ini_env() {
 
 # Applies every SANDBOX_<Group>__<Key> variable to the SandboxVars file. The value must have the
 # type of the current one (number, true/false or string), so a typo can't break the Lua file; a
-# string setting gets its quotes added when the value has none.
+# string setting gets its quotes added when the value has none. The game writes the options of a mod
+# into the file on the first start that loads it, so on that start the file lacks them: one a mod the
+# server loads declares is added, with a value its declaration allows.
 apply_sandbox_env() {
-  local lua_file="$1" name path names updates problems=""
+  # $1 = SandboxVars file, $2 = what load_mods printed
+  local lua_file="$1" rows="$2" names declared problems=""
   names="$(compgen -e | grep '^SANDBOX_' | sort || true)"
   [ -n "${names}" ] || return 0
   if [ ! -f "${lua_file}" ]; then
     echo "Warning: ${lua_file} does not exist yet, so SANDBOX_ settings apply from the next start (or set SERVERPRESET to create it now)." >&2
     return 0
   fi
-  updates="$(mktemp)"
-  while IFS= read -r name; do
-    path="${name#SANDBOX_}"
-    printf '%s\t%s\t%s\n' "${name}" "${path//__/.}" "${!name}" >> "${updates}"
-  done <<< "${names}"
+  declared="$(mktemp)"
+  awk -F '\t' '$1 == "load"' <<< "${rows}" | cut -f 2- | sandbox_options > "${declared}"
   # A partly written file must not replace the real one (a full disk, for example).
-  if awk -v updates_file="${updates}" -v out="${lua_file}.tmp" '
+  if NAMES="${names}" awk -v declared_file="${declared}" -v out="${lua_file}.tmp" '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-    BEGIN {
-      while ((getline line < updates_file) > 0) {
-        split(line, f, "\t")
-        k = tolower(f[2])
-        env_of[k] = f[1]
-        path_of[k] = f[2]
-        value_of[k] = substr(line, length(f[1]) + length(f[2]) + 3)
+    # The game writes strings back with their line breaks unescaped, which breaks the file.
+    function one_line(s) { return s !~ /[\n\r]/ }
+    # A value in quotes is a Lua string already, in which \" and \\ stand for a quote and a backslash.
+    function lua_string(s,   text, i) {
+      if (s ~ /^".*"$/) {
+        text = ""
+        for (i = 2; i < length(s); i++) {
+          if (substr(s, i, 1) == "\\" && i + 1 < length(s) && index("\\\"", substr(s, i + 1, 1))) i++
+          text = text substr(s, i, 1)
+        }
+        s = text
       }
+      gsub(/[\\"]/, "\\\\&", s)
+      return "\"" s "\""
+    }
+    # The Lua value of v for an option of a mod (CustomSandboxOptions, SandboxOptions), "" when the
+    # option takes no such value.
+    function allowed(v, type, low, high) {
+      if (type == "boolean") return tolower(v) ~ /^(true|false)$/ ? tolower(v) : ""
+      if (type == "string") return one_line(v) ? lua_string(v) : ""
+      return v ~ (type == "double" ? "^-?[0-9]+(\\.[0-9]+)?$" : "^-?[0-9]+$") && v + 0 >= low + 0 && v + 0 <= high + 0 ? v : ""
+    }
+    function pending(k) { return !(k in applied) && lua_value[k] != "" }
+    # The options of the mods the server loads that the file lacks, before the closing brace of their
+    # table ("" for SandboxVars itself), in the order the game writes them.
+    function add(table, indent,   i, k) {
+      for (i = 1; i <= count; i++) {
+        k = order[i]
+        if (table_of[k] != table || !pending(k)) continue
+        print indent short_of[k] " = " lua_value[k] "," > out
+        applied[k] = 1
+        printf "Config: sandbox %s set from %s\n", id_of[k], env_of[k] > "/dev/stderr"
+      }
+    }
+    BEGIN {
+      n = split(ENVIRON["NAMES"], names, "\n")
+      for (i = 1; i <= n; i++) {
+        path = names[i]
+        sub(/^SANDBOX_/, "", path)
+        gsub(/__/, ".", path)
+        k = tolower(path)
+        env_of[k] = names[i]
+        path_of[k] = path
+      }
+      # Of options with the same id the last one counts, since the game writes their values in turn.
+      # It writes the id as the table and key names, which only makes valid Lua with one dot at most.
+      while ((getline line < declared_file) > 0) {
+        split(line, f, "\t")
+        k = tolower(f[3])
+        if (!(k in env_of) || f[3] !~ /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/) continue
+        id_of[k] = f[3]
+        order[++count] = k
+        dot = index(f[3], ".")
+        table_of[k] = substr(f[3], 1, dot - 1)
+        short_of[k] = substr(f[3], dot + 1)
+        enum = f[4] == "enum"
+        lua_value[k] = allowed(ENVIRON[env_of[k]], f[4], enum ? 1 : f[6], enum ? f[11] : f[7])
+      }
+      close(declared_file)
     }
     {
       line = $0
@@ -123,6 +174,18 @@ apply_sandbox_env() {
         next
       }
       if (code ~ /^\}[ \t]*,?$/) {
+        if (depth == 1) {
+          add(stack[1], "        ")
+        } else if (depth == 0) {
+          add("", "    ")
+          for (i = 1; i <= count; i++) {
+            k = order[i]
+            if (!pending(k)) continue
+            print "    " table_of[k] " = {" > out
+            add(table_of[k], "        ")
+            print "    }," > out
+          }
+        }
         if (depth > 0) depth--
         print line > out
         next
@@ -133,18 +196,15 @@ apply_sandbox_env() {
         path = ""
         for (i = 1; i <= depth; i++) path = path stack[i] "."
         path = tolower(path key)
-        if (path in value_of) {
+        if (path in env_of) {
           old = code
           sub(/^[^=]*=[ \t]*/, "", old)
           sub(/[ \t]*,?[ \t]*$/, "", old)
-          new = value_of[path]
+          new = ENVIRON[env_of[path]]
           applied[path] = 1
           if (old ~ /^".*"$/) {
-            if (new !~ /^".*"$/) {
-              gsub(/\\/, "\\\\", new)
-              gsub(/"/, "\\\"", new)
-              new = "\"" new "\""
-            }
+            if (!one_line(new)) { invalid[path] = 1; print line > out; next }
+            new = lua_string(new)
           } else if (old ~ /^(true|false)$/) {
             new = tolower(new)
             if (new !~ /^(true|false)$/) { invalid[path] = 1; print line > out; next }
@@ -164,18 +224,22 @@ apply_sandbox_env() {
     }
     END {
       for (k in env_of) {
-        if (!(k in applied)) print "unknown " env_of[k]
-        else if (k in invalid) print "invalid " env_of[k]
+        if (k in invalid) print "invalid " env_of[k]
+        else if (k in applied) continue
+        else if (k in id_of) print "disallowed " env_of[k]
+        else print "unknown " env_of[k]
       }
     }
-  ' "${lua_file}" > "${updates}.problems"; then
+  ' "${lua_file}" > "${declared}.problems"; then
     mv "${lua_file}.tmp" "${lua_file}"
-    problems="$(sort "${updates}.problems")"
+    problems="$(sort "${declared}.problems")"
   fi
-  rm -f "${updates}" "${updates}.problems" "${lua_file}.tmp"
-  report_problems "match no setting in ${lua_file}" "$(sed -n 's/^unknown / /p' <<< "${problems}" | tr -d '\n')"
-  report_problems "need a value of the same type as the current one (number, true/false or text) in ${lua_file}" \
+  rm -f "${declared}" "${declared}.problems" "${lua_file}.tmp"
+  report_problems "match no setting in ${lua_file} or of the mods the server loads" "$(sed -n 's/^unknown / /p' <<< "${problems}" | tr -d '\n')"
+  report_problems "need a value of the same type as the current one (number, true/false or text on one line) in ${lua_file}" \
     "$(sed -n 's/^invalid / /p' <<< "${problems}" | tr -d '\n')"
+  report_problems "need a value their mod's sandbox-options.txt allows (true/false, a number from its min to its max, 1 to numValues for an enum, or text on one line)" \
+    "$(sed -n 's/^disallowed / /p' <<< "${problems}" | tr -d '\n')"
 }
 
 # Warns about variables that set the same thing, saying which one is used.

@@ -112,7 +112,7 @@ test_sandbox() {
   new_env
   export SANDBOX_Zombies=2 SANDBOX_ZombieLore__Transmission=3 SANDBOX_zombielore__mortality=7 \
     SANDBOX_Map__MapAllKnown=TRUE SANDBOX_WorldItemRemovalList='Base.Hat, "Base.Glasses"' SANDBOX_Nope__Key=1
-  apply_sandbox_env "${SERVER}/pzserver_SandboxVars.lua" 2> "${WORK}/err"
+  apply_sandbox_env "${SERVER}/pzserver_SandboxVars.lua" "" 2> "${WORK}/err"
   local lua="${SERVER}/pzserver_SandboxVars.lua"
   expect_line "${lua}" '    Zombies = 2,'
   expect_line "${lua}" '        Transmission = 3,'
@@ -121,18 +121,128 @@ test_sandbox() {
   expect_line "${lua}" '    WorldItemRemovalList = "Base.Hat, \"Base.Glasses\"",'
   expect_line "${lua}" '    -- Default = Normal'
   grep -q 'match no setting.*SANDBOX_Nope__Key' "${WORK}/err" || fail "unknown sandbox path was not reported"
-  (CONFIG_STRICT=true apply_sandbox_env "${lua}" 2>/dev/null) && fail "CONFIG_STRICT did not stop on an unknown path"
+  (CONFIG_STRICT=true apply_sandbox_env "${lua}" "" 2>/dev/null) && fail "CONFIG_STRICT did not stop on an unknown path"
   unset SANDBOX_Nope__Key
 
-  # A value of the wrong type would break the Lua file or the setting, so the old line stays.
-  SANDBOX_Zombies=lots SANDBOX_Map__MapAllKnown=1 apply_sandbox_env "${lua}" 2> "${WORK}/err"
+  # A value in quotes is a Lua string, with \" and \\ in it for a quote and a backslash.
+  SANDBOX_WorldItemRemovalList='"say \"hi\" \\ \x \"' apply_sandbox_env "${lua}" "" 2> /dev/null
+  expect_line "${lua}" '    WorldItemRemovalList = "say \"hi\" \\ \\x \\",'
+
+  # A value of the wrong type would break the Lua file or the setting, so the old line stays. So
+  # would a line break, which the game writes back as it is.
+  SANDBOX_Zombies=lots SANDBOX_Map__MapAllKnown=1 SANDBOX_WorldItemRemovalList=$'Base.Hat\nBase.Axe' apply_sandbox_env "${lua}" "" 2> "${WORK}/err"
   expect_line "${lua}" '    Zombies = 2,'
   expect_line "${lua}" '        MapAllKnown = true,'
-  grep -q 'same type.*SANDBOX_Map__MapAllKnown SANDBOX_Zombies' "${WORK}/err" || fail "wrong value types were not reported"
+  expect_line "${lua}" '    WorldItemRemovalList = "say \"hi\" \\ \\x \\",'
+  grep -q 'same type.*SANDBOX_Map__MapAllKnown SANDBOX_WorldItemRemovalList SANDBOX_Zombies' "${WORK}/err" || fail "wrong value types were not reported"
 
   rm "${lua}"
-  apply_sandbox_env "${lua}" 2> "${WORK}/err"
+  apply_sandbox_env "${lua}" "" 2> "${WORK}/err"
   grep -q 'apply from the next start' "${WORK}/err" || fail "missing SandboxVars file was not reported"
+}
+
+test_sandbox_mods() {
+  TEST='mod sandbox'
+  new_env
+  fake_steam
+  PATH="${WORK}/bin:${PATH}"
+  configure_file_watcher() { :; }
+  local lua="${SERVER}/pzserver_SandboxVars.lua" fresh="${HOMEDIR}/workshop/103/mods/Fresh/common"
+  # The game writes the options of a mod into SandboxVars on the first start that loads it, so the
+  # image adds those its variables set. Item 101 has options for this game version, among them bounds
+  # Java reads and an id the game writes as invalid Lua, others in common/, which the game doesn't read
+  # then, and a table in the file from before the mod added options. Item 103 has options only in
+  # common/, the last two of them again options of item 101, and is downloaded on this start. Item 102
+  # is downloaded, but not in Mods=. The game writes text back with its line breaks and carriage
+  # returns as they are, which breaks the file.
+  make_mod 101 Sand SandMod 42
+  mod_file 101/mods/Sand/42/media/sandbox-options.txt <<'EOF'
+VERSION = 1,
+option Sand.Old { type = integer, min = 0, max = 10, default = 1, }
+option Sand.Count { type = integer, min = -5, max = 50, default = 10, }
+option Sand.Ratio { type = double, min = 2d, max = 090.5f, default = 3, }
+option Sand.Mode { type = enum, numValues = 3, default = 1, }
+option Sand.On { type = boolean, default = false, }
+option Sand.Off { type = boolean, default = true, }
+option Sand.Name { type = string, default = x, }
+option Sand.Lines { type = string, default = x, }
+option Sand.High { type = integer, min = 0, max = 10, default = 1, }
+option Sand.Low { type = double, min = 0.5, max = 2.5, default = 1, }
+option Sand.Level { type = enum, numValues = 2, default = 1, }
+option Sand.Wrong { type = integer, min = 0, max = 10, default = 1, }
+option Sand.Unset { type = string, default = x, }
+option Sand.Deep.X { type = boolean, default = true, }
+option SandTop { type = boolean, default = false, }
+EOF
+  printf '%s\n' 'VERSION = 1,' 'option Sand.CommonOnly' '{' 'type = boolean,' 'default = true,' '}' | mod_file 101/mods/Sand/common/media/sandbox-options.txt
+  make_mod 102 Other OtherMod 42
+  printf '%s\n' 'VERSION = 1,' 'option Other.X' '{' 'type = boolean,' 'default = true,' '}' | mod_file 102/mods/Other/42/media/sandbox-options.txt
+  mkdir -p "${fresh}/media"
+  printf 'id=FreshMod\n' > "${fresh}/mod.info"
+  printf '%s\n' 'VERSION = 1,' 'option Fresh.Flag' '{' 'type = boolean,' 'default = true,' '}' \
+    'option Fresh.Speed' '{' 'type = integer,' 'min = 1,' 'max = 9,' 'default = 1,' '}' \
+    'option Stale.X' '{' 'type = integer,' 'min = 0,' 'max = 1,' 'default = 0,' '}' \
+    'option Sand.High' '{' 'type = integer,' 'min = 0,' 'max = 20,' 'default = 1,' '}' \
+    'option Sand.Count' '{' 'type = integer,' 'min = 0,' 'max = 1,' 'default = 0,' '}' > "${fresh}/media/sandbox-options.txt"
+  cat > "${lua}" <<'EOF'
+SandboxVars = {
+    VERSION = 6,
+    Zombies = 4,
+    Sand = {
+        Old = 1,
+    },
+}
+EOF
+  export FAKE_GAME_VERSION=42.21.0 WORKSHOP_IDS='101;102;103' INI_Mods='\SandMod;\FreshMod' SANDBOX_Zombies=3 SANDBOX_Sand__Old=2 \
+    SANDBOX_Sand__Count=-5 SANDBOX_Sand__Ratio=10.5 SANDBOX_Sand__Mode=3 SANDBOX_sand__on=TRUE SANDBOX_Sand__Off=1 SANDBOX_Sand__Name='a "b" \c' \
+    SANDBOX_Sand__Lines=$'one\r' SANDBOX_Sand__High=11 SANDBOX_Sand__Low=0.4 SANDBOX_Sand__Level=0 SANDBOX_Sand__Wrong=1.5 \
+    SANDBOX_SandTop=true SANDBOX_Fresh__Speed=1 SANDBOX_Fresh__Flag=false SANDBOX_Stale__X=5 SANDBOX_Sand__CommonOnly=false \
+    SANDBOX_Other__X=false SANDBOX_Sand__Typo=1 SANDBOX_Sand__Deep__X=true
+  configure_server > "${WORK}/out" 2> "${WORK}/err"
+  expect_line "${WORK}/out" 'Workshop: downloaded 1 new item with SteamCMD'
+  # In the game's format and order, and valid Lua
+  expect_eq "$(cat "${lua}")" "$(cat <<'EOF'
+SandboxVars = {
+    VERSION = 6,
+    Zombies = 3,
+    Sand = {
+        Old = 2,
+        Ratio = 10.5,
+        Mode = 3,
+        On = true,
+        Name = "a \"b\" \\c",
+        High = 11,
+    },
+    SandTop = true,
+    Fresh = {
+        Flag = false,
+        Speed = 1,
+    },
+}
+EOF
+)"
+  expect_line "${WORK}/err" 'Config: sandbox Sand.Ratio set from SANDBOX_Sand__Ratio'
+  expect_line "${WORK}/err" 'Config: sandbox Fresh.Speed set from SANDBOX_Fresh__Speed'
+  expect_line "${WORK}/err" "Warning: these variables match no setting in ${lua} or of the mods the server loads, so they were not applied: SANDBOX_Other__X SANDBOX_Sand__CommonOnly SANDBOX_Sand__Deep__X SANDBOX_Sand__Typo"
+  expect_line "${WORK}/err" "Warning: these variables need a value their mod's sandbox-options.txt allows (true/false, a number from its min to its max, 1 to numValues for an enum, or text on one line), so they were not applied: SANDBOX_Sand__Count SANDBOX_Sand__Level SANDBOX_Sand__Lines SANDBOX_Sand__Low SANDBOX_Sand__Off SANDBOX_Sand__Wrong SANDBOX_Stale__X"
+  grep -q 'same type' "${WORK}/err" && fail "a mod's option the file lacks was checked against the file"
+
+  # The next start finds them in the file, and a strict one stops on the rest.
+  cp "${lua}" "${WORK}/lua.before"
+  configure_server > /dev/null 2>&1
+  cmp -s "${lua}" "${WORK}/lua.before" || fail "SandboxVars changed on the next start: $(diff "${WORK}/lua.before" "${lua}")"
+  unset SANDBOX_Sand__Count SANDBOX_Sand__Level SANDBOX_Sand__Lines SANDBOX_Sand__Low SANDBOX_Sand__Off SANDBOX_Sand__Wrong SANDBOX_Stale__X
+  (CONFIG_STRICT=true configure_server > /dev/null 2> "${WORK}/err")
+  expect_eq "$?" 1
+  grep -q '^Error: CONFIG_STRICT is set' "${WORK}/err" || fail "the strict start did not stop on SANDBOX_Sand__Typo"
+  unset SANDBOX_Other__X SANDBOX_Sand__CommonOnly SANDBOX_Sand__Deep__X SANDBOX_Sand__Typo
+  (CONFIG_STRICT=true configure_server > /dev/null 2>&1) || fail "the strict start stopped without a problem"
+
+  # Before the game has written the file, nothing is added.
+  rm "${lua}"
+  configure_server > /dev/null 2> "${WORK}/err"
+  grep -q 'apply from the next start' "${WORK}/err" || fail "missing SandboxVars file was not reported"
+  [ -f "${lua}" ] && fail "SandboxVars was written before the game wrote it"
 }
 
 test_preset() {
@@ -2268,7 +2378,7 @@ EOF
   expect_eq "$?" 0
 }
 
-for t in test_ini test_sandbox test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_sandbox_mods test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 
