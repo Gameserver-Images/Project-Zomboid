@@ -101,7 +101,39 @@ apply_sandbox_env() {
   awk -F '\t' '$1 == "load"' <<< "${rows}" | cut -f 2- | sandbox_options > "${declared}"
   # A partly written file must not replace the real one (a full disk, for example).
   if NAMES="${names}" awk -v declared_file="${declared}" -v out="${lua_file}.tmp" '
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+    # The line without its comment, which starts at -- outside a string
+    function code_of(line,   i, c, quote) {
+      quote = ""
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (quote != "") {
+          if (c == "\\") i++
+          else if (c == quote) quote = ""
+        } else if (c == "\"" || c == "\047") {
+          quote = c
+        } else if (substr(line, i, 2) == "--") {
+          return substr(line, 1, i - 1)
+        }
+      }
+      return line
+    }
+    # The file is written at the end, so a separator can still go after the last field.
+    function emit(line,   code) {
+      kept[++lines] = line
+      code = code_of(line)
+      sub(/[ \t\r]+$/, "", code)
+      if (code != "") {
+        last = lines
+        last_end = length(code)
+      }
+    }
+    # Fields need a comma or semicolon between them. The game writes one after each field, but its
+    # presets leave it out after the last field of a table.
+    function separate(   c) {
+      c = substr(kept[last], last_end, 1)
+      if (c != "," && c != ";" && c != "{") kept[last] = substr(kept[last], 1, last_end) "," substr(kept[last], last_end + 1)
+    }
     # The game writes strings back with their line breaks unescaped, which breaks the file.
     function one_line(s) { return s !~ /[\n\r]/ }
     # A value in quotes is a Lua string already, in which \" and \\ stand for a quote and a backslash.
@@ -131,7 +163,8 @@ apply_sandbox_env() {
       for (i = 1; i <= count; i++) {
         k = order[i]
         if (table_of[k] != table || !pending(k)) continue
-        print indent short_of[k] " = " lua_value[k] "," > out
+        separate()
+        emit(indent short_of[k] " = " lua_value[k] ",")
         applied[k] = 1
         printf "Config: sandbox %s set from %s\n", id_of[k], env_of[k] > "/dev/stderr"
       }
@@ -164,16 +197,16 @@ apply_sandbox_env() {
     }
     {
       line = $0
-      code = trim(line)
-      if (code ~ /^[A-Za-z0-9_]+[ \t]*=[ \t]*\{[ \t]*$/) {
+      code = trim(code_of(line))
+      if (code ~ /^[A-Za-z0-9_]+[ \t]*=[ \t]*\{$/) {
         key = code
         sub(/[ \t]*=.*/, "", key)
         if (seen_root) stack[++depth] = key
         seen_root = 1
-        print line > out
+        emit(line)
         next
       }
-      if (code ~ /^\}[ \t]*,?$/) {
+      if (code ~ /^\}[ \t]*[,;]?$/) {
         if (depth == 1) {
           add(stack[1], "        ")
         } else if (depth == 0) {
@@ -181,13 +214,14 @@ apply_sandbox_env() {
           for (i = 1; i <= count; i++) {
             k = order[i]
             if (!pending(k)) continue
-            print "    " table_of[k] " = {" > out
+            separate()
+            emit("    " table_of[k] " = {")
             add(table_of[k], "        ")
-            print "    }," > out
+            emit("    },")
           }
         }
         if (depth > 0) depth--
-        print line > out
+        emit(line)
         next
       }
       if (code ~ /^[A-Za-z0-9_]+[ \t]*=/) {
@@ -199,30 +233,31 @@ apply_sandbox_env() {
         if (path in env_of) {
           old = code
           sub(/^[^=]*=[ \t]*/, "", old)
-          sub(/[ \t]*,?[ \t]*$/, "", old)
+          sub(/[ \t]*[,;]$/, "", old)
           new = ENVIRON[env_of[path]]
           applied[path] = 1
           if (old ~ /^".*"$/) {
-            if (!one_line(new)) { invalid[path] = 1; print line > out; next }
+            if (!one_line(new)) { invalid[path] = 1; emit(line); next }
             new = lua_string(new)
           } else if (old ~ /^(true|false)$/) {
             new = tolower(new)
-            if (new !~ /^(true|false)$/) { invalid[path] = 1; print line > out; next }
+            if (new !~ /^(true|false)$/) { invalid[path] = 1; emit(line); next }
           } else if (old ~ /^-?[0-9]+(\.[0-9]+)?$/) {
-            if (new !~ /^-?[0-9]+(\.[0-9]+)?$/) { invalid[path] = 1; print line > out; next }
+            if (new !~ /^-?[0-9]+(\.[0-9]+)?$/) { invalid[path] = 1; emit(line); next }
           } else if (new == "") {
-            invalid[path] = 1; print line > out; next
+            invalid[path] = 1; emit(line); next
           }
           indent = line
           sub(/[^ \t].*$/, "", indent)
-          print indent key " = " new "," > out
+          emit(indent key " = " new ",")
           printf "Config: sandbox %s set from %s\n", path_of[path], env_of[path] > "/dev/stderr"
           next
         }
       }
-      print line > out
+      emit(line)
     }
     END {
+      for (i = 1; i <= lines; i++) print kept[i] > out
       for (k in env_of) {
         if (k in invalid) print "invalid " env_of[k]
         else if (k in applied) continue

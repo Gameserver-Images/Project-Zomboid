@@ -243,6 +243,27 @@ EOF
   configure_server > /dev/null 2> "${WORK}/err"
   grep -q 'apply from the next start' "${WORK}/err" || fail "missing SandboxVars file was not reported"
   [ -f "${lua}" ] && fail "SandboxVars was written before the game wrote it"
+
+  # Unlike the game, its presets leave out the separator after the last field of a table. A field
+  # gets one when another follows it, unless it has one.
+  printf '%s\n' 'return {' '    Version = 6; -- a semicolon and a comment after a value' '    Zombies = 4, -- a comment after a value' '' \
+    '    -- a comment line' '    Sand = {' '        Old = 1;' '        Label = "a \"quote -- y" -- the last field, with dashes in its text' \
+    '        -- the end of Sand' '    };' '' '    Fresh = {' $'\t    Flag = true,' $'        Other = \'a -- b\';\t' '    }' '' '}' \
+    > "${STEAMAPPDIR}/media/lua/shared/Sandbox/Styled.lua"
+  unset SANDBOX_SandTop
+  SERVERPRESET=Styled SANDBOX_Version=six SANDBOX_Stale__X=1 configure_server > /dev/null 2> "${WORK}/err"
+  expect_eq "$(cat "${lua}")" "$(printf '%s\n' 'SandboxVars = {' '    Version = 6; -- a semicolon and a comment after a value' '    Zombies = 3,' '' \
+    '    -- a comment line' '    Sand = {' '        Old = 2,' '        Label = "a \"quote -- y", -- the last field, with dashes in its text' \
+    '        -- the end of Sand' '        Ratio = 10.5,' '        Mode = 3,' '        On = true,' '        Name = "a \"b\" \\c",' '        High = 11,' \
+    '    };' '' '    Fresh = {' $'\t    Flag = false,' $'        Other = \'a -- b\';\t' '        Speed = 1,' '    },' '' '    Stale = {' '        X = 1,' \
+    '    },' '}')"
+  grep -q 'same type.*SANDBOX_Version$' "${WORK}/err" || fail "a value of the wrong type after a semicolon was not reported"
+  grep -qE 'match no setting|their mod' "${WORK}/err" && fail "warned about the settings of a file from a preset: $(cat "${WORK}/err")"
+  # Line ends of Windows too
+  sed -e 's/^        Old = 2,$/        Old = 5,/' -e '$i\    SandTop = true,' "${lua}" > "${WORK}/lua.expected"
+  sed -i 's/$/\r/' "${lua}"
+  SANDBOX_Sand__Old=5 SANDBOX_SandTop=true configure_server > /dev/null 2>&1
+  expect_eq "$(tr -d '\r' < "${lua}")" "$(cat "${WORK}/lua.expected")"
 }
 
 test_preset() {
