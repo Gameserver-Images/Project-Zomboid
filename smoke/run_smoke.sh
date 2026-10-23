@@ -849,6 +849,23 @@ EOF
   printf '\357\273\277{\n  "Sandbox_Multi": "Multi settings",\n  "Sandbox_Multi_Mode": "Mode",\n  "Sandbox_Multi_Modes_option1": "Easy",\n  "Sandbox_Multi_Modes_option3": "Hard",\n  "Sandbox_Multi_Strength_tooltip": "How strong"\n}\n' \
     | mod_file "${multi}/common/media/lua/shared/Translate/EN/Sandbox.json"
   mkdir -p "${STEAMAPPDIR}/steamapps/workshop/content/108600/${multi}/"{42.21/media/maps/Variant\ Map,common/media/maps/Common\ Map,common/media/maps/Muldraugh\,\ KY,42/media/maps/Old\ Map}
+  # A map's cells come from the first of the mod's folders with the map folder, each zone file from the first
+  # with that file; lotheaders only count as <x>_<y>.lotheader. The game's own zone loader still fails on
+  # zones without coordinates, the mod's doesn't.
+  local maps="${STEAMAPPDIR}/steamapps/workshop/content/108600/${multi}" cell
+  for cell in 10_5 11_5 12_5 10_6 x_1 1_2_3; do touch "${maps}/42.21/media/maps/Variant Map/${cell}.lotheader"; done
+  touch "${maps}/42.21/media/maps/Variant Map/chunkdata_10_5.bin" "${maps}/42.21/media/maps/Variant Map/13_5.lotheader.bak"
+  mkdir -p "${maps}/common/media/maps/Variant Map"
+  touch "${maps}/common/media/maps/Variant Map/99_99.lotheader"
+  printf '%s\n' 'zones = {}' 'regions = {' '}' | mod_file "${multi}/42.21/media/maps/Variant Map/regions.lua"
+  printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' \
+    '  { name = "", type = "WaterZone", geometry = "polygon", points = { 1, 2, 3, 4 } },' '}' \
+    | mod_file "${multi}/common/media/maps/Variant Map/objects.lua"
+  printf '%s\n' "local s = v.x .. v.y" | mod_file "${multi}/common/media/lua/server/metazones/metazoneHandler.lua"
+  mkdir -p "${STEAMAPPDIR}/media/maps/Muldraugh, KY" "${STEAMAPPDIR}/media/lua/server/metazones"
+  for cell in 0_0 1_0 -1_0 0_1; do touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/${cell}.lotheader"; done
+  printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' '}' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/objects.lua"
+  printf '%s\n' "print('..v.x..','..v.y..','..v.z)" 'local w = v.x + v.width' > "${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
   # A byte order mark hides the id= line from the game.
   printf '\357\273\277id=MultiAddon\r\nname=Addon\r\n' | mod_file 101/mods/Addon/42/mod.info
   printf '%s\r\n' 'VERSION = 1,' 'option Addon.Flag' '{' 'type = boolean,' 'default = false,' 'translation = Addon_Flag,' '}' \
@@ -940,7 +957,11 @@ EOF
   expect_eq "$(jq -c '.items[0] | [.title, .description, .tags, .updated, .size, .requiredItems]' "${out}")" '["Item 101","[b]About 101[/b]",["Build 42"],1700000000,4096,null]'
   expect_eq "$(jq -c '.items[3] | [.title, .description, .tags, .updated, .size]' "${out}")" '[null,null,null,null,null]'
   expect_eq "$(jq -c '.items[3].mods[0].sandbox | map([.env, .label])' "${out}")" '[["SANDBOX_Hidden__X",null]]'
-  expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox)' "${out}")" \
+  expect_eq "$(jq -S -c '.items[0].mods[1] | [.mapFolders, .zoneLoader]' "${out}")" \
+    '[[{"cells":[],"name":"Common Map","zones":{}},{"cells":[],"name":"Muldraugh, KY","zones":{}},{"cells":[[5,10,12],[6,10,10]],"name":"Variant Map","zones":{"objects.lua":3,"regions.lua":null}}],false]'
+  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","zones":{"objects.lua":null}}],"zoneLoader":true}'
+  expect_eq "$(jq -c '[.items[5].mods[0] | .mapFolders, .zoneLoader]' "${out}")" '[[],null]'
+  expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox, .mapFolders, .zoneLoader)' "${out}")" \
     '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"error":null,"require":["StarlitLibrary","2392709985TsarLib","PlainReq"],"requireEntries":["StarlitLibrary","2392709985TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
   expect_eq "$(jq -c '.items[0].mods[1].sandbox | map([.env, .type, .default, .current])' "${out}")" \
     '[["SANDBOX_Multi__Mode","enum","1","2"],["SANDBOX_Multi__Strength","integer","10",null],["SANDBOX_Multi__Shared","double","1.5",null],["SANDBOX_MultiNoDot","boolean","true","false"]]'

@@ -9,6 +9,7 @@
       --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e2e2dc;
       --accent: #2f6f4e; --code-bg: #f0f0ea;
       --warn: #8a5a00; --warn-bg: #fbf0d9; --bad: #b3261e; --bad-bg: #fbe7e4;
+      --cell-vanilla: #d6d6cf; --cell-mod: #3f74b8; --cell-over: #d39b16; --cell-shared: #c43a2f; --cell-other: #8a4fc4; --cell-focus: #1d1d1b;
       color-scheme: light dark;
     }
     @media (prefers-color-scheme: dark) {
@@ -16,6 +17,7 @@
         --bg: #161714; --panel: #1f201c; --text: #e8e8e2; --muted: #9a9a92; --border: #33352f;
         --accent: #7fc39b; --code-bg: #2a2c26;
         --warn: #e3b558; --warn-bg: #352c1a; --bad: #f08c7e; --bad-bg: #3a221f;
+        --cell-vanilla: #3b3d36; --cell-mod: #6f9fe0; --cell-over: #e8b94a; --cell-shared: #f07a6c; --cell-other: #c39af0; --cell-focus: #f4f4ee;
       }
     }
     * { box-sizing: border-box; }
@@ -126,6 +128,15 @@
     .flash { animation: flash 1.6s ease-out; }
     @keyframes flash { from { background: var(--warn-bg); } }
     .bands { margin-bottom: 16px; }
+    .grid-box { margin-bottom: 14px; }
+    .grid-box h3 { margin-top: 0; }
+    .legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 0.85rem; color: var(--muted); margin-right: auto; }
+    .swatch { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    .swatch.other { background: none; border: 2px solid var(--cell-other); }
+    .grid-scroll { overflow: auto; max-height: 70vh; margin: 8px 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+    #map-grid { display: block; touch-action: manipulation; cursor: crosshair; }
+    #map-cell { min-height: 1.5em; overflow-wrap: anywhere; }
+    .map-name { font-weight: 600; }
     .bands h3 { margin-top: 0; }
 
     details.sandbox { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }
@@ -243,6 +254,23 @@
         <section id="tab-maps" role="tabpanel" aria-labelledby="tab-button-maps" hidden>
           <p class="hint">The image adds the maps of the mods that load to <code>Map=</code> by itself, before the vanilla map. Include <code>INI_Map</code> only to set their order.</p>
           <div class="controls"><label><input id="include-map" type="checkbox"> Include <code>INI_Map</code> in the output</label></div>
+          <section id="grid-box" class="panel grid-box" aria-labelledby="grid-title">
+            <h3 id="grid-title">Cells</h3>
+            <p class="hint"><span id="grid-rule"></span> Drag the maps below to change the order.</p>
+            <div class="bar">
+              <span id="grid-legend" class="legend"></span>
+              <span class="row-buttons">
+                <button id="grid-out" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+                <button id="grid-fit" type="button" title="Fit the grid to the width">Fit</button>
+                <button id="grid-in" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+              </span>
+            </div>
+            <div id="grid-scroll" class="grid-scroll"><canvas id="map-grid" role="img"></canvas></div>
+            <p id="map-cell" class="hint">Point at a cell, or tap it, to see its maps. Click one to outline its first map.</p>
+            <label><input id="other-maps" type="checkbox"> Also show the maps of downloaded mods that don't load</label>
+            <ul id="other-map-list" class="notes" hidden></ul>
+          </section>
+          <p id="grid-none" class="hint" hidden></p>
           <ol id="map-list" class="sortable"></ol>
         </section>
 
@@ -316,6 +344,13 @@
   // Far more than list-mods writes for any server; a gzip bomb stops there too.
   const MAX_BYTES = 20 * 1024 * 1024;
   const DOWNLOAD_SECONDS = 30;
+  // The files the game reads a map's zones from, in the order the image checks them.
+  const ZONE_FILES = ['objects.lua', 'regions.lua', 'roomtones.lua'];
+  // Cell coordinates and runs far beyond any map, and cells in all of a file's map folders together: a bigger run
+  // or file is cut there instead of filling the browser's memory.
+  const CELL_LIMIT = 1 << 20;
+  const MAX_RUN = 4096;
+  const MAX_CELLS = 2000000;
   const PROBLEM_KINDS = [
     ['workshopId', 'WORKSHOP_IDS entries that are not workshop IDs', 'The image refuses to start with them. Write only the IDs, the numbers in their workshop links, separated by ";".'],
     ['loop', 'Stop the server', 'The game loads what a mod requires before the mod and does not check for loops, so with one of these the server never finishes loading mods and stops with a StackOverflowError.'],
@@ -324,6 +359,9 @@
     ['kept', 'Kept first, but not at the top', 'Sort puts them back at the top, each after what it must load after.'],
     ['incompatible', 'Incompatible mods'],
     ['setting', 'Server settings the mods ask for', 'Their workshop pages ask for values other than the ones the server has or the .env lines set. Server settings has the INI_ line for each.'],
+    ['zones', 'Maps that stop the map zones', 'The game loads map zones (car spawns, animals, basements, water and the like) from the last map in Map= to the first, and stops at the first zone it fails on, so the maps above that one in Map= lose theirs. Maps says what to move.'],
+    ['cells', 'Maps of different items that share cells', () => `${sharedRule()} Maps shows where.`],
+    ['folders', 'Maps with fewer cells than one of their folders', "The game reads all of a map's cells from one folder: the one of the mod loaded last that has a folder of that name. For these maps, another mod's or the game's folder has more cells."],
     ['duplicate', 'Mod IDs in several items'],
     ['unknown', 'Enabled but not in any downloaded item'],
     ['uncovered', () => `Items missing from ${listName()}`, () => (state.workshopIds.length
@@ -352,6 +390,9 @@
   let orderRows = new Map();
   let bandRows = new Map();
   let mapRows = new Map();
+  let mapFocus = null;  // the map outlined on the grid
+  let gridSize = null;  // pixels per cell, null to fit the width
+  let grid = null;      // what the grid shows, for pointing at it
   let settingNodes = new Map();
   let loadId = null;   // ties the saved state to the file it was made for
   let keep = new Set(); // the mod IDs kept first, for every file
@@ -503,6 +544,43 @@
     return o;
   }
 
+  // A mod's or the game's map folders as list-mods read them: per map, its cells as runs [y, first x, last x] and, per
+  // zone file it has, the line of the zone the game stops at (null when it reads the whole file). budget is what is
+  // left of MAX_CELLS.
+  function mapFolders(raw, budget) {
+    const folders = new Map();
+    for (const f of list(raw)) {
+      if (!oneLine(f?.name) || folders.has(f.name)) continue;
+      const runs = [];
+      for (const r of list(f.cells)) {
+        if (!Array.isArray(r) || r.length !== 3 || !r.every(v => Number.isInteger(v) && Math.abs(v) < CELL_LIMIT) || r[2] < r[1] || r[2] - r[1] >= MAX_RUN) continue;
+        if ((budget.cells -= r[2] - r[1] + 1) < 0) break;
+        runs.push(r);
+      }
+      const zones = new Map();
+      const raw_zones = f.zones && typeof f.zones === 'object' ? f.zones : {};
+      for (const file of ZONE_FILES) {
+        const line = Object.hasOwn(raw_zones, file) ? raw_zones[file] : undefined;
+        if (line === null || (Number.isInteger(line) && line > 0)) zones.set(file, line);
+      }
+      folders.set(f.name, { name: f.name, runs, zones, keys: null });
+    }
+    return folders;
+  }
+
+  const cellKey = (x, y) => (y + CELL_LIMIT) * 2 * CELL_LIMIT + x + CELL_LIMIT;
+  const cellX = key => (key % (2 * CELL_LIMIT)) - CELL_LIMIT;
+  const cellY = key => Math.floor(key / (2 * CELL_LIMIT)) - CELL_LIMIT;
+
+  function folderKeys(folder) {
+    if (!folder.keys) {
+      const keys = new Set();
+      for (const [y, from, to] of folder.runs) for (let x = from; x <= to; x++) keys.add(cellKey(x, y));
+      folder.keys = [...keys];
+    }
+    return folder.keys;
+  }
+
   function buildModel(json) {
     const server = json.server && typeof json.server === 'object' ? json.server : {};
     const options = server.options && typeof server.options === 'object' && !Array.isArray(server.options)
@@ -520,6 +598,10 @@
       items: new Map(), collections: new Map(), instances: new Map(), byModId: new Map(), options: new Map(),
       modMaps: new Set(), categories: new Set(), iniKeys: new Map(),
     };
+    const budget = { cells: MAX_CELLS };
+    // An older image's list-mods has no map files.
+    const game = json.game && typeof json.game === 'object' && !Array.isArray(json.game) ? json.game : null;
+    m.game = game && { folders: mapFolders(game.mapFolders, budget), zoneLoader: typeof game.zoneLoader === 'boolean' ? game.zoneLoader : null };
     // The keys of pzserver.ini by their lower case: DoLuaChecksum, then the server's, or without them the anti-cheat
     // settings the game code shows for this version.
     const known = settings ? [] : m.b41 ? B41_KEYS : m.b4220 ? ANTICHEATS.map(key => [key, 'number']) : [];
@@ -555,6 +637,7 @@
           // Build 41 keeps spaces around an id= value, but the server trims what names a mod, so nothing reaches it.
           error: text(rawMod.error) ?? (rawMod.id !== rawMod.id.trim() ? "its id= has spaces around it, which the server's Mods= can't match" : null),
           sandbox: list(rawMod.sandbox).map(sandboxOption),
+          folders: mapFolders(rawMod.mapFolders, budget), zoneLoader: typeof rawMod.zoneLoader === 'boolean' ? rawMod.zoneLoader : null,
         };
         // The game loads the require entries as written, and one with spaces around it names no mod.
         const spaced = mod.requireEntries.find(r => r !== r.trim()) ?? null;
@@ -804,6 +887,7 @@
       bandOrder: { collection: [], category: [] },
       maps: model.server.map.slice(),
       includeMap: false,
+      otherMaps: false,
       workshopIds: model.workshopIds.slice(),
       // Small packs start expanded; big ones render a group only when it is opened.
       open: model.items.size <= 40 ? allGroupIds(model.groups) : [],
@@ -823,6 +907,7 @@
     for (const mode of ['collection', 'category']) s.bandOrder[mode] = texts(saved.bandOrder?.[mode]);
     if (Array.isArray(saved.maps)) s.maps = list(saved.maps).filter(oneLine);
     s.includeMap = saved.includeMap === true;
+    s.otherMaps = saved.otherMaps === true;
     if (Array.isArray(saved.workshopIds)) s.workshopIds = list(saved.workshopIds).filter(oneLine);
     if (Array.isArray(saved.open)) s.open = texts(saved.open);
     if (TABS.includes(saved.tab)) s.tab = saved.tab;
@@ -1107,6 +1192,7 @@
     const settingKeys = [...new Set(settings.flatMap(({ asks }) => asks.map(ask => ask.key)).filter(Boolean))];
     derived = { rows, rowOf, edges, enabled: new Set(state.mods), loaded: loadPos, bands, bandOfId, firstOfBand, notes, problems: p, modsWithOptions, settings, settingKeys };
     derived.maps = mapList(loaded);
+    derived.mapCheck = model.game ? checkMaps(loaded, p) : null;
     derived.output = output();
     derived.single = defaultTxt(loaded);
   }
@@ -1129,6 +1215,119 @@
     for (const name of fromMods.keys()) if (!names.includes(name)) names.push(name);
     if (vanilla || !state.maps.length) names.push(VANILLA_MAP);
     return names.map(name => ({ name, mods: fromMods.get(name) || [] }));
+  }
+
+  const sharedRule = () => (model.b41 ? 'Where maps share a cell, the one earlier in Map= takes the whole cell.'
+    : 'Where maps share a cell, the one earlier in Map= wins where both have something on a square; the later one loses its buildings only where the earlier one covers a whole cell.');
+
+  // The map files as the game reads them (ZomboidFileSystem.loadMod's activeFileMap): each map folder and each zone file
+  // from the mod loaded last that has it, else from the game. Like the image's start, it finds the maps that share
+  // cells and, while the game's zone loader fails on zones that lack what it needs, the first map whose zones it stops at.
+  function checkMaps(loaded, p) {
+    const sources = [
+      ...loaded.map(entry => entry.inst).filter(Boolean).reverse().map(inst => ({ inst, folders: inst.mod.folders, loader: inst.mod.zoneLoader })),
+      { inst: null, folders: model.game.folders, loader: model.game.zoneLoader },
+    ];
+    const who = source => (source.inst ? source.inst.id : 'the game');
+    const cellCount = folder => folder.runs.reduce((n, [, from, to]) => n + to - from + 1, 0);
+    const maps = derived.maps.map((entry, index) => {
+      const candidates = sources.filter(s => s.folders.has(entry.name));
+      const source = candidates[0];
+      let stop = null;
+      for (const file of ZONE_FILES) {
+        const from = sources.find(s => s.folders.get(entry.name)?.zones.has(file));
+        const line = from?.folders.get(entry.name).zones.get(file);
+        if (line) {
+          stop = { file, line, mod: from.inst?.id ?? null };
+          break;
+        }
+      }
+      const folder = source?.folders.get(entry.name);
+      const notes = [];
+      if (candidates.length > 1) {
+        const best = candidates.slice(1).reduce((a, b) => (cellCount(b.folders.get(entry.name)) > cellCount(a.folders.get(entry.name)) ? b : a));
+        const [have, could] = [cellCount(folder), cellCount(best.folders.get(entry.name))];
+        const fewer = have < could;
+        notes.push({ level: fewer ? 'warn' : 'muted', text: `The game reads this map's cells only from ${who(source)}'s folder of that name, which replaces ${candidates.slice(1).map(s => `${who(s)}'s`).join(', ')}.${fewer ? ` It has ${plural(have, 'cell')}, ${who(best)}'s has ${could}.` : ''}` });
+        if (fewer) p.folders.push({ text: `${entry.name}: ${plural(have, 'cell')} from ${who(source)}, ${could} in ${who(best)}'s folder`, go: () => goToMap(entry.name) });
+      }
+      return {
+        ...entry, index, known: Boolean(source), item: source ? source.inst?.itemId ?? 'game' : null, keys: folder ? folderKeys(folder) : [],
+        stop, over: 0, shares: new Map(), notes,
+      };
+    });
+    const byName = new Map(maps.map(m => [m.name, m]));
+    const goTo = name => () => goToMap(name);
+
+    // The game reads the zones from the last map to the first and stops at the first zone it fails on.
+    const loader = sources.find(s => s.loader !== null)?.loader;
+    const broken = !model.b41 && loader === true ? maps.filter(m => m.stop).reverse() : [];
+    if (broken.length) {
+      const first = broken[0];
+      const above = maps.slice(0, first.index);
+      const where = m => `line ${m.stop.line} of its ${m.stop.file}${m.stop.mod ? ` (from ${m.stop.mod})` : ''}`;
+      const atTop = broken.every(m => m.index < broken.length);
+      const move = atTop ? '' : ` Move ${broken.length > 1 ? `${broken.slice(0, -1).map(m => m.name).join(', ')} and ${broken.at(-1).name}` : first.name} to the top of Map= so that only ${broken.length > 1 ? 'they lose' : 'it loses'} zones.`;
+      first.notes.push({ level: 'bad', text: `The game fails on the zone at ${where(first)} and stops loading map zones there: this map loses its zones from that line on${above.length ? `, and ${plural(above.length, 'map')} above it lose${above.length === 1 ? 's' : ''} all of theirs` : ''}.${move}` });
+      for (const m of above) {
+        m.notes.push(m.stop
+          ? { level: 'bad', text: `The game fails on a zone at ${where(m)} too, but stops at ${first.name}'s first.` }
+          : { level: 'warn', text: `Loses its zones (car spawns, animals, basements, water and the like): the game stops at ${first.name}'s first.` });
+      }
+      for (const m of broken) p.zones.push({ text: `${m.name}: ${where(m)}`, go: goTo(m.name) });
+    }
+
+    // Shared cells: maps of different items, the vanilla map left out, as the image's start compares them.
+    const vanilla = byName.get(VANILLA_MAP);
+    const vanillaKeys = new Set(vanilla?.keys);
+    const owners = new Map();
+    for (const m of maps) {
+      if (m === vanilla) continue;
+      for (const key of m.keys) {
+        if (vanillaKeys.has(key)) m.over++;
+        const here = owners.get(key);
+        if (here) here.push(m);
+        else owners.set(key, [m]);
+      }
+    }
+    for (const here of owners.values()) {
+      for (let a = 0; a < here.length; a++) {
+        for (let b = a + 1; b < here.length; b++) {
+          if (here[a].item === here[b].item) continue;
+          here[a].shares.set(here[b], (here[a].shares.get(here[b]) || 0) + 1);
+          here[b].shares.set(here[a], (here[b].shares.get(here[a]) || 0) + 1);
+        }
+      }
+    }
+    const counted = list => list.map(([other, count]) => `${other.name} (${count})`).join(', ');
+    for (const m of maps) {
+      const shares = [...m.shares].sort(([a], [b]) => a.index - b.index);
+      const earlier = shares.filter(([other]) => other.index < m.index);
+      const later = shares.filter(([other]) => other.index > m.index);
+      if (earlier.length) m.notes.push({ level: 'warn', text: `Shares cells with ${earlier.length > 1 ? 'maps' : 'a map'} earlier in Map=: ${counted(earlier)}.` });
+      if (later.length) m.notes.push({ level: 'warn', text: `Shares cells with ${later.length > 1 ? 'maps' : 'a map'} later in Map=: ${counted(later)}.` });
+      for (const [other, count] of later) p.cells.push({ text: `${m.name} and ${other.name}: ${plural(count, 'cell')}, ${m.name} first`, go: goTo(m.name) });
+    }
+    return { maps, byName, owners, vanillaKeys };
+  }
+
+  // The maps of downloaded mods that don't load and aren't in Map=, each from the first such mod that has it, with what it
+  // would share.
+  function otherMaps() {
+    const { maps, owners, vanillaKeys } = derived.mapCheck;
+    // Map= has every map of the mods that load.
+    const using = new Set(maps.map(m => m.name));
+    const others = new Map();
+    for (const inst of model.instances.values()) {
+      for (const folder of inst.mod.folders.values()) {
+        if (folder.name === VANILLA_MAP || using.has(folder.name) || others.has(folder.name) || !folder.runs.length) continue;
+        const keys = folderKeys(folder);
+        const shares = new Map();
+        for (const key of keys) for (const m of owners.get(key) || []) if (m.item !== inst.itemId) shares.set(m, (shares.get(m) || 0) + 1);
+        others.set(folder.name, { name: folder.name, inst, keys, keySet: new Set(keys), shares, over: keys.filter(key => vanillaKeys.has(key)).length });
+      }
+    }
+    return [...others.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   function output() {
@@ -1789,23 +1988,194 @@
 
   function renderMaps() {
     const maps = derived.maps;
+    const check = derived.mapCheck;
     const movable = maps.filter(entry => entry.name !== VANILLA_MAP);
     mapRows = new Map();
     $('map-list').replaceChildren(...maps.map(entry => {
       const i = movable.indexOf(entry);
       const from = entry.mods.length ? `from ${entry.mods.join(', ')}` : entry.name === VANILLA_MAP ? 'vanilla map, always last' : 'kept from Map=';
-      if (i < 0) return h('li', { class: 'fixed' }, h('span', { class: 'grow', text: entry.name }), h('span', { class: 'n', text: from }));
-      const row = h('li', { draggable: 'true', 'data-index': i },
-        h('span', { class: 'handle', 'aria-hidden': 'true', text: '⠿' }),
-        h('span', { class: 'grow', text: entry.name }),
-        h('span', { class: 'n', text: from }),
-        h('span', { class: 'row-buttons' },
-          rowButton('up', `Move ${entry.name} up`, '↑', i === 0, () => moveMap(i, i - 1, entry.name, 'up')),
-          rowButton('down', `Move ${entry.name} down`, '↓', i === movable.length - 1, () => moveMap(i, i + 2, entry.name, 'down'))));
+      const info = check?.byName.get(entry.name);
+      const notes = info ? [...info.notes] : [];
+      if (info && !info.known) notes.unshift({ level: 'muted', text: 'No mod that loads has this map, so the grid has no cells for it.' });
+      else if (info?.keys.length) notes.unshift({ level: 'muted', text: `${plural(info.keys.length, 'cell')}${info.over ? `, ${info.over} over the vanilla map` : ''}.` });
+      const level = notes.some(note => note.level === 'bad') ? 'bad' : notes.some(note => note.level === 'warn') ? 'warn' : null;
+      const show = info?.keys.length ? rowButton('show', `Outline ${entry.name} on the grid`, '◎', false, () => focusMap(entry.name), String(mapFocus === entry.name)) : null;
+      const body = h('div', { class: 'grow' },
+        h('div', {}, h('span', { class: 'map-name', text: entry.name }), ' ', h('span', { class: 'n', text: from })),
+        notes.length ? h('ul', { class: 'notes' }, notes.map(note => h('li', { class: note.level, text: note.text }))) : null);
+      const row = i < 0
+        ? h('li', { class: level ? `fixed ${level}` : 'fixed', tabindex: '-1' }, body, show ? h('span', { class: 'row-buttons' }, show) : null)
+        : h('li', { class: level, draggable: 'true', 'data-index': i, tabindex: '-1' },
+          h('span', { class: 'handle', 'aria-hidden': 'true', text: '⠿' }),
+          body,
+          h('span', { class: 'row-buttons' },
+            show,
+            rowButton('up', `Move ${entry.name} up`, '↑', i === 0, () => moveMap(i, i - 1, entry.name, 'up')),
+            rowButton('down', `Move ${entry.name} down`, '↓', i === movable.length - 1, () => moveMap(i, i + 2, entry.name, 'down'))));
       mapRows.set(entry.name, row);
       return row;
     }));
     $('include-map').checked = state.includeMap;
+    $('other-maps').checked = state.otherMaps;
+    $('grid-box').hidden = !check;
+    $('grid-none').hidden = Boolean(check);
+    $('grid-none').textContent = check ? '' : 'This list-mods output has no map cells: it comes from an older image. Update the image and run list-mods again to see the maps on a grid.';
+    if (check) {
+      $('grid-rule').textContent = sharedRule();
+      renderOtherMaps();
+      drawGrid();
+    }
+  }
+
+  function renderOtherMaps() {
+    const box = $('other-map-list');
+    box.hidden = !state.otherMaps;
+    if (!state.otherMaps) {
+      grid = { ...grid, others: [] };
+      box.replaceChildren();
+      return;
+    }
+    const others = otherMaps();
+    grid = { ...grid, others };
+    box.replaceChildren(...(others.length ? others.map(o => {
+      const shares = [...o.shares].sort(([a], [b]) => a.index - b.index).map(([m, count]) => `${m.name} (${count})`);
+      const what = [`${plural(o.keys.length, 'cell')}`, o.over ? `${o.over} over the vanilla map` : null, shares.length ? `would share cells with ${shares.join(', ')}` : null].filter(Boolean).join(', ');
+      return h('li', { class: shares.length ? 'warn' : null },
+        h('button', { type: 'button', class: 'link', text: o.name, 'aria-pressed': String(mapFocus === o.name), onclick: () => focusMap(o.name) }),
+        ` from ${o.inst.id} (${itemTitle(o.inst.item)}): ${what}. `,
+        h('button', { type: 'button', class: 'small', text: 'Find the mod', onclick: () => goToItem(o.inst.itemId) }));
+    }) : [h('li', { class: 'muted', text: 'Every downloaded mod with a map loads already.' })]));
+  }
+
+  function focusMap(name) {
+    mapFocus = mapFocus === name ? null : name;
+    for (const [key, row] of mapRows) row.querySelector('[data-action="show"]')?.setAttribute('aria-pressed', String(mapFocus === key));
+    $('other-map-list').querySelectorAll('button[aria-pressed]').forEach(b => b.setAttribute('aria-pressed', String(mapFocus === b.textContent)));
+    drawGrid();
+    if (mapFocus) $('grid-box').scrollIntoView({ block: 'nearest' });
+  }
+
+  function goToMap(name) {
+    mapFocus = name;
+    switchTab('maps');
+    const row = mapRows.get(name);
+    if (!row) return;
+    flash(row);
+    row.focus({ preventScroll: true });
+  }
+
+  const cssColor = (style, name) => style.getPropertyValue(name).trim();
+
+  // The cells of the maps in Map= (and of the other maps, as outlines), by what is on them; one map's cells outlined.
+  function drawGrid() {
+    const check = derived.mapCheck;
+    const canvas = $('map-grid');
+    const others = state.otherMaps ? grid?.others || [] : [];
+    const all = [...check.maps.map(m => m.keys), ...others.map(o => o.keys)];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const keys of all) {
+      for (const key of keys) {
+        const x = cellX(key);
+        const y = cellY(key);
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (minX === Infinity) {
+      canvas.hidden = true;
+      $('grid-legend').textContent = 'The maps in Map= have no cells.';
+      grid = { others };
+      return;
+    }
+    canvas.hidden = false;
+    const cols = maxX - minX + 1;
+    const rows = maxY - minY + 1;
+    const fit = Math.max(1, Math.min(16, Math.floor(($('grid-scroll').clientWidth - 2) / cols)));
+    const size = Math.max(1, Math.min(32, gridSize ?? fit, Math.floor(16384 / Math.max(cols, rows))));
+    const ratio = Math.min(window.devicePixelRatio || 1, Math.max(1, Math.floor(16384 / (Math.max(cols, rows) * size))));
+    canvas.width = cols * size * ratio;
+    canvas.height = rows * size * ratio;
+    canvas.style.width = `${cols * size}px`;
+    canvas.style.height = `${rows * size}px`;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const style = getComputedStyle(canvas);
+    const colors = Object.fromEntries(['vanilla', 'mod', 'over', 'shared', 'other', 'focus'].map(kind => [kind, cssColor(style, `--cell-${kind}`)]));
+    const gap = size >= 5 ? 1 : 0;
+    const fill = (key, color) => {
+      ctx.fillStyle = color;
+      ctx.fillRect((cellX(key) - minX) * size, (cellY(key) - minY) * size, size - gap, size - gap);
+    };
+    const counts = { vanilla: 0, mod: 0, over: 0, shared: 0 };
+    for (const key of check.vanillaKeys) {
+      if (check.owners.has(key)) continue;
+      counts.vanilla++;
+      fill(key, colors.vanilla);
+    }
+    for (const [key, here] of check.owners) {
+      const kind = here.some(m => m.item !== here[0].item) ? 'shared' : check.vanillaKeys.has(key) ? 'over' : 'mod';
+      counts[kind]++;
+      fill(key, colors[kind]);
+    }
+    ctx.strokeStyle = colors.other;
+    ctx.lineWidth = Math.max(1, Math.min(2, size / 4));
+    const inset = ctx.lineWidth / 2;
+    for (const o of others) {
+      for (const key of o.keys) ctx.strokeRect((cellX(key) - minX) * size + inset, (cellY(key) - minY) * size + inset, size - 2 * inset - gap, size - 2 * inset - gap);
+    }
+    const focus = check.byName.get(mapFocus) || others.find(o => o.name === mapFocus);
+    if (focus) {
+      // The outline of its area: the cell edges that no other cell of the map shares.
+      const own = new Set(focus.keys);
+      ctx.strokeStyle = colors.focus;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const key of focus.keys) {
+        const x = (cellX(key) - minX) * size;
+        const y = (cellY(key) - minY) * size;
+        if (!own.has(key - 2 * CELL_LIMIT)) { ctx.moveTo(x, y + 1); ctx.lineTo(x + size, y + 1); }
+        if (!own.has(key + 2 * CELL_LIMIT)) { ctx.moveTo(x, y + size - 1); ctx.lineTo(x + size, y + size - 1); }
+        if (!own.has(key - 1)) { ctx.moveTo(x + 1, y); ctx.lineTo(x + 1, y + size); }
+        if (!own.has(key + 1)) { ctx.moveTo(x + size - 1, y); ctx.lineTo(x + size - 1, y + size); }
+      }
+      ctx.stroke();
+    }
+    const legend = [
+      ['vanilla', 'Vanilla map only'], ['mod', 'One mod map'], ['over', 'A mod map over the vanilla map'], ['shared', 'Maps of different items'],
+    ].map(([kind, label]) => h('span', {}, h('span', { class: 'swatch', style: `background: var(--cell-${kind})` }), `${label} ${counts[kind]}`));
+    if (others.length) legend.push(h('span', {}, h('span', { class: 'swatch other' }), `Maps of mods that don't load ${others.reduce((n, o) => n + o.keys.length, 0)}`));
+    $('grid-legend').replaceChildren(...legend);
+    canvas.setAttribute('aria-label', `Cells of the maps in Map=: ${counts.vanilla} with only the vanilla map, ${counts.mod} with one mod map, ${counts.over} with a mod map over the vanilla map, ${counts.shared} with maps of different items. The list below says the same for each map.`);
+    grid = { others, minX, minY, size, cols, rows };
+  }
+
+  // The maps on the cell under the pointer, in Map= order.
+  function cellAt(event) {
+    if (!grid?.size) return null;
+    const box = $('map-grid').getBoundingClientRect();
+    const x = Math.floor((event.clientX - box.left) / grid.size);
+    const y = Math.floor((event.clientY - box.top) / grid.size);
+    if (x < 0 || y < 0 || x >= grid.cols || y >= grid.rows) return null;
+    const key = cellKey(x + grid.minX, y + grid.minY);
+    const check = derived.mapCheck;
+    // The vanilla map is always last in Map=.
+    const here = [...check.owners.get(key) || [], ...(check.vanillaKeys.has(key) ? [check.byName.get(VANILLA_MAP)] : [])];
+    return { x: x + grid.minX, y: y + grid.minY, here, others: grid.others.filter(o => o.keySet.has(key)) };
+  }
+
+  function describeCell(cell) {
+    if (!cell) return 'Point at a cell, or tap it, to see its maps. Click one to outline its first map.';
+    const squares = model.b41 ? 300 : 256;
+    const range = v => `${v * squares} to ${(v + 1) * squares - 1}`;
+    const names = cell.here.map((m, i) => (i === 0 && cell.here.length > 1 ? `${m.name} (first in Map=)` : m.name));
+    const others = cell.others.map(o => `${o.name} (its mod doesn't load)`);
+    const what = [...names, ...others];
+    return `Cell ${cell.x}, ${cell.y} (squares x ${range(cell.x)}, y ${range(cell.y)}): ${what.length ? what.join(', ') : 'no map'}.`;
   }
 
   function moveMap(from, insertAt, name, action) {
@@ -2049,6 +2419,7 @@
     state = restoredState(saved);
     sandboxSections.clear();
     problemsOpen.clear();
+    mapFocus = gridSize = grid = null;
     showLoadError();
     $('load').hidden = true;
     $('app').hidden = false;
@@ -2133,7 +2504,8 @@
     orderRows = new Map();
     sandboxSections.clear();
     settingNodes = new Map();
-    for (const id of ['tree', 'order-list', 'band-list', 'map-list', 'sandbox-list', 'server-list', 'problems', 'output']) $(id).replaceChildren();
+    for (const id of ['tree', 'order-list', 'band-list', 'map-list', 'other-map-list', 'sandbox-list', 'server-list', 'problems', 'output']) $(id).replaceChildren();
+    mapFocus = gridSize = grid = null;
     for (const id of ['paste', 'file', 'env-text']) $(id).value = '';
     $('env-report').textContent = '';
     $('import').open = false;
@@ -2378,6 +2750,36 @@
     state.includeMap = $('include-map').checked;
     commit();
   });
+  $('other-maps').addEventListener('change', () => {
+    state.otherMaps = $('other-maps').checked;
+    saveState();
+    renderOtherMaps();
+    drawGrid();
+  });
+  const zoom = factor => {
+    gridSize = factor ? Math.max(1, Math.min(32, Math.round((grid?.size || 4) * factor) || 1)) : null;
+    drawGrid();
+  };
+  $('grid-in').addEventListener('click', () => zoom(grid?.size < 2 ? 2 : 1.5));
+  $('grid-out').addEventListener('click', () => zoom(1 / 1.5));
+  $('grid-fit').addEventListener('click', () => zoom(null));
+  const showCell = e => { $('map-cell').textContent = describeCell(cellAt(e)); };
+  $('map-grid').addEventListener('pointermove', showCell);
+  $('map-grid').addEventListener('pointerdown', showCell);
+  $('map-grid').addEventListener('click', e => {
+    const cell = cellAt(e);
+    const name = cell?.here[0]?.name ?? cell?.others[0]?.name;
+    if (name && name !== mapFocus) focusMap(name);
+  });
+  // The grid follows the page's width while it fits, and the colour scheme.
+  const redrawGrid = () => { if (state?.tab === 'maps' && derived?.mapCheck && !$('app').hidden) drawGrid(); };
+  let gridWidth = 0;
+  new ResizeObserver(([entry]) => {
+    if (gridSize !== null || Math.abs(entry.contentRect.width - gridWidth) < 1) return;
+    gridWidth = entry.contentRect.width;
+    requestAnimationFrame(redrawGrid);
+  }).observe($('grid-scroll'));
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redrawGrid);
   $('copy').addEventListener('click', () => copyText(derived.output.text, $('copy-status')));
   $('download').addEventListener('click', () => saveFile(derived.output.text, 'mods.env'));
   $('default-txt').addEventListener('click', () => saveFile(derived.single.text, 'default.txt'));

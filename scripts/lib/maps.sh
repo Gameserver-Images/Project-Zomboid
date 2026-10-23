@@ -21,6 +21,13 @@ map_roots() {
   printf '%s\t\t\n' "${STEAMAPPDIR}/media/maps"
 }
 
+# True while the zone loader still builds its error messages and water zone bounds from x, y, z, width and
+# height, which fails on a zone without them (Build 42's metazoneHandler.lua).
+zone_loader_fails() {
+  # $1 = metazoneHandler.lua
+  grep -qF "'..v.x..','..v.y..','..v.z" "$1" && grep -qF 'v.x + v.width' "$1"
+}
+
 # Names the maps in Map= and warns about zones that stop the game's map zone loading and about maps of
 # different items that share cells. Like apply_mod_maps, it needs the game version. Unlike the game, it
 # matches map and file names case-sensitively, and takes a Map= without ";" as that one map, where the
@@ -63,8 +70,7 @@ check_maps() {
     table+=("${line%$'\t'}")
   done < <(split_list "${maps}" | awk '!seen[$0]++')
   # The zone rules are those of Build 42's zone loader, as long as it still fails on these.
-  if [ "${version%%.*}" -ge 42 ] && [ -n "${handler}" ] && grep -qF "'..v.x..','..v.y..','..v.z" "${handler}" \
-    && grep -qF 'v.x + v.width' "${handler}"; then
+  if [ "${version%%.*}" -ge 42 ] && [ -n "${handler}" ] && zone_loader_fails "${handler}"; then
     printf '%s\n' "${table[@]}" | map_zone_warnings
   fi
   printf '%s\n' "${table[@]}" | map_overlap_warnings "${version}"
@@ -83,10 +89,10 @@ check_maps() {
 # takes the zones from. The game can't compile a file that starts with a UTF-8 byte order mark and
 # reads none of its zones, so those files are skipped; other files Lua can't compile are read as they
 # are.
-map_zone_warnings() {
-  # stdin = per entry of Map=: map, item, folder, objects.lua, regions.lua, roomtones.lua and the mod
-  # each of these comes from
-  LC_ALL=C awk -F '\t' '
+zone_stops() {
+  # stdin = paths of objects.lua, regions.lua and roomtones.lua files. Prints "<path>\t<line>" for each
+  # file the game stops in, with the line of the zone it fails on.
+  LC_ALL=C awk '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
     function text_of(value) { return value ~ /^\$[0-9]+$/ ? str[substr(value, 2) + 0] : "" }
     # The code of a line without comments, with each string replaced by $<n> and its text in str[n].
@@ -178,48 +184,69 @@ map_zone_warnings() {
       }
       return 0
     }
+    BEGIN {
+      token = "[\"\047]|--|\\[=*\\["
+      split("N NW W SW S SE E NE", d, " ")
+      for (i in d) directions[d[i]]
+    }
+    {
+      path = $0
+      file = path
+      sub(/.*\//, "", file)
+      global = file == "regions.lua" ? "regions" : "objects"
+      closing = ""
+      inside = 0
+      n = 0
+      while ((getline line < path) > 0) {
+        if (++n == 1 && substr(line, 1, 3) == "\357\273\277") break
+        sub(/\r$/, "", line)
+        if (closing == "" && line !~ /Water|Mannequin|RoomTone|Animal|Vehicle|ParkingStall|objects|regions|\[/) continue
+        line = code(line)
+        if (!inside) inside = line ~ "^[ \t]*" global "[ \t]*="
+        else if (zone(line) && stops(file)) {
+          print path "\t" n
+          break
+        }
+      }
+      close(path)
+    }
+  '
+}
+
+# Warns about the first map the game stops loading zones at, and the maps that lose their zones by it.
+map_zone_warnings() {
+  # stdin = per entry of Map=: map, item, folder, objects.lua, regions.lua, roomtones.lua and the mod
+  # each of these comes from
+  local table
+  table="$(cat)"
+  LC_ALL=C awk -F '\t' '
     # "a", "a and b", "a, b and c"
     function list(items, n,   i, s) {
       s = items[1]
       for (i = 2; i <= n; i++) s = s (i < n ? ", " : " and ") items[i]
       return s
     }
-    BEGIN {
-      token = "[\"\047]|--|\\[=*\\["
-      split("N NW W SW S SE E NE", d, " ")
-      for (i in d) directions[d[i]]
+    FNR == NR {
+      if ($0 != "") stop_line[$1] = $2
+      next
     }
-    { row[NR] = $0; name[NR] = $1 }
+    {
+      row[++rows] = $0
+      name[rows] = $1
+    }
     END {
       # In the order the game reads them, from the last map to the first: it stops at the first broken
       # map it reaches, and reaches the others once that one is fixed.
-      for (m = NR; m >= 1; m--) {
+      for (m = rows; m >= 1; m--) {
         split(row[m], col, "\t")
         at = ""
         for (k = 4; k <= 6 && at == ""; k++) {
-          if (col[k] == "") continue
-          file = col[k]
-          sub(/.*\//, "", file)
-          global = file == "regions.lua" ? "regions" : "objects"
-          closing = ""
-          inside = 0
-          n = 0
-          while ((getline line < col[k]) > 0) {
-            if (++n == 1 && substr(line, 1, 3) == "\357\273\277") break
-            sub(/\r$/, "", line)
-            if (closing == "" && line !~ /Water|Mannequin|RoomTone|Animal|Vehicle|ParkingStall|objects|regions|\[/) continue
-            line = code(line)
-            if (!inside) inside = line ~ "^[ \t]*" global "[ \t]*="
-            else if (zone(line) && stops(file)) {
-              at = col[k] ":" n
-              if (col[k + 3] != "" && !(col[k + 3] in named)) {
-                named[col[k + 3]]
-                mods[++nm] = col[k + 3]
-              }
-              break
-            }
+          if (col[k] == "" || !(col[k] in stop_line)) continue
+          at = col[k] ":" stop_line[col[k]]
+          if (col[k + 3] != "" && !(col[k + 3] in named)) {
+            named[col[k + 3]]
+            mods[++nm] = col[k + 3]
           }
-          close(col[k])
         }
         if (at != "") {
           stop[++nb] = m
@@ -234,7 +261,7 @@ map_zone_warnings() {
         before = name[1]
         for (i = 2; i < s; i++) before = before ";" name[i]
         what = " (car spawns, animals, basements, water and the like)"
-        text = text (s == NR ? "every other map loses its zones" what \
+        text = text (s == rows ? "every other map loses its zones" what \
           : "the maps before " name[s] " in Map= lose their zones" what ": " before) ", and " name[s] " loses its own zones from that line on."
       }
       if (nb > 1) {
@@ -255,7 +282,7 @@ map_zone_warnings() {
       for (i = 2; i <= n; i++) text = text (i < n ? ", " : n > 2 ? ", or " : " or ") option[i]
       print text "." > "/dev/stderr"
     }
-  '
+  ' <(cut -f 4-6 <<< "${table}" | tr '\t' '\n' | sed '/^$/d' | LC_ALL=C sort -u | zone_stops; echo) <(printf '%s\n' "${table}")
 }
 
 # Where maps share a cell (<x>_<y>.lotheader), the game takes the cell from the map earlier in Map=.

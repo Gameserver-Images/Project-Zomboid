@@ -145,6 +145,12 @@ jq -R -s --arg label "${label}" --arg release "${release}" '
 mods_json="$(docker exec "${name}" list-mods)" || fail "list-mods failed"
 jq -e --arg version "${version}" '.format == 2 and .items == [] and .gameVersion == $version' <<< "${mods_json}" >/dev/null \
   || fail "list-mods did not describe a server without mods on game version ${version}: ${mods_json}"
+# The mods page draws the vanilla map from the game's own map files.
+vanilla="$(jq -c '[.game.mapFolders[] | select(.name == "Muldraugh, KY")][0]' <<< "${mods_json}")"
+cells="$(jq '[.cells[]? | .[2] - .[1] + 1] | add // 0' <<< "${vanilla}")"
+[ "${cells}" -gt 0 ] || fail "list-mods found no cells of the vanilla map: ${vanilla}"
+jq -e '[.zones[]? | select(. != null)] == []' <<< "${vanilla}" > /dev/null || fail "list-mods says the game stops at a zone of its own map: ${vanilla}"
+echo "::notice title=Map cells::${label}: the vanilla map has ${cells} cells in $(jq '.cells | length' <<< "${vanilla}") runs, the zone loader fails on zones without coordinates: $(jq '.game.zoneLoader' <<< "${mods_json}"), list-mods printed $(wc -c <<< "${mods_json}") bytes"
 
 stop_server 1
 

@@ -44,6 +44,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 . "${SCRIPT_DIR}/lib/mods.sh"
 # shellcheck source=scripts/lib/game.sh
 . "${SCRIPT_DIR}/lib/game.sh"
+# shellcheck source=scripts/lib/maps.sh
+. "${SCRIPT_DIR}/lib/maps.sh"
 
 check_workshop_ids || exit 1
 
@@ -165,6 +167,53 @@ awk -F '\t' '$4 == 1 && $19 == ""' "${tmp}/mods" > "${tmp}/standalone"
 # And the sandbox options of the mods that load by themselves
 sandbox_options < "${tmp}/standalone" | sed 's/^/option\t/' >> "${tmp}/files"
 
+# The map files of every mod whose mod.info the game reads, and of the game ("game"), for the mods page to
+# pick from in load order as the game does: of a mod's folders (the version folder, then common/), the first
+# with a map folder gives the map's cells (<x>_<y>.lotheader), the first with a zone file gives that file, and
+# the first with metazoneHandler.lua the zone loader.
+declare -A map_seen=() zone_seen=() loader_seen=()
+while IFS=$'\t' read -r key media; do
+  handler="${media}/lua/server/metazones/metazoneHandler.lua"
+  if [ -z "${loader_seen[${key}]+x}" ] && [ -f "${handler}" ]; then
+    loader_seen["${key}"]=1
+    fails=false
+    zone_loader_fails "${handler}" && fails=true
+    printf 'loader\t%s\t%s\n' "${key}" "${fails}"
+  fi
+  for map_dir in "${media}"/maps/*/; do
+    map_dir="${map_dir%/}"
+    name="${map_dir##*/}"
+    if [ -z "${map_seen[${key}$'\t'${name}]+x}" ]; then
+      map_seen["${key}"$'\t'"${name}"]=1
+      printf 'folder\t%s\t%s\t%s\n' "${key}" "${name}" "${map_dir}"
+    fi
+    for file in objects.lua regions.lua roomtones.lua; do
+      if [ -z "${zone_seen[${key}$'\t'${name}$'\t'${file}]+x}" ] && [ -f "${map_dir}/${file}" ]; then
+        zone_seen["${key}"$'\t'"${name}"$'\t'"${file}"]=1
+        printf 'zone\t%s\t%s\t%s\t%s\n' "${key}" "${name}" "${file}" "${map_dir}/${file}"
+      fi
+    done
+  done
+done < <(mod_dirs < "${tmp}/mods" | awk -F '\t' '{ print $1 "/" $2 "\t" $4 "/media" }'; printf 'game\t%s\n' "${STEAMAPPDIR}/media") > "${tmp}/map_files"
+# The cells of each map folder as runs [y, first x, last x], by y and x.
+mapfile -t map_dirs < <(awk -F '\t' '$1 == "folder" { print $4 }' "${tmp}/map_files")
+if [ "${#map_dirs[@]}" -gt 0 ]; then
+  find -L "${map_dirs[@]}" -maxdepth 1 -name '*.lotheader' -printf '%H\t%f\n' 2> /dev/null
+fi | LC_ALL=C awk -F '\t' '$2 ~ /^-?[0-9]+_-?[0-9]+\.lotheader$/ { split($2, at, /[_.]/); print $1 "\t" at[2] "\t" at[1] }' \
+  | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n -k3,3n | LC_ALL=C awk -F '\t' '
+    function flush() { if (n) printf "%s[%d,%d,%d]", (runs++ ? "," : ""), y, first, last }
+    $1 != folder {
+      if (folder != "") { flush(); print "]" }
+      folder = $1
+      printf "%s\t[", folder
+      runs = n = 0
+    }
+    n && $2 == y && $3 == last + 1 { last = $3; next }
+    { flush(); y = $2; first = last = $3; n = 1 }
+    END { if (folder != "") { flush(); print "]" } }
+  ' > "${tmp}/cells"
+awk -F '\t' '$1 == "zone" { print $5 }' "${tmp}/map_files" | zone_stops > "${tmp}/zone_stops"
+
 bash "${SCRIPT_DIR}/list_env.sh" --tsv | awk -F '\t' '$1 == "ini" || $1 == "sandbox"' > "${tmp}/settings"
 
 jq -n -c \
@@ -180,7 +229,10 @@ jq -n -c \
   --rawfile downloaded "${tmp}/downloaded" \
   --rawfile mods "${tmp}/mods" \
   --rawfile files "${tmp}/files" \
-  --rawfile settings "${tmp}/settings" '
+  --rawfile settings "${tmp}/settings" \
+  --rawfile map_files "${tmp}/map_files" \
+  --rawfile cells "${tmp}/cells" \
+  --rawfile zone_stops "${tmp}/zone_stops" '
   def lines: split("\n") | map(select(length > 0));
   def rows: lines | map(split("\t"));
   def text: if . == "" then null else . end;
@@ -211,6 +263,17 @@ jq -n -c \
   | ($details | map(.response.publishedfiledetails // [] | .[] | select(.result == 1)) | INDEX(.publishedfileid)) as $info
   | ($required | map(.response.publishedfiledetails // [] | .[]) | INDEX(.publishedfileid)) as $required
   | ($downloaded | lines | map({key: ., value: true}) | from_entries) as $downloaded
+  # Per mod (item/folder) and for the game: the map folders with their cells and the line of the zone the game
+  # stops at in each zone file (null when it reads the whole file), and whether its zone loader fails on them.
+  | ($map_files | rows) as $map_files
+  | ($cells | rows | map({key: .[0], value: (.[1] | fromjson)}) | from_entries) as $cells
+  | ($zone_stops | rows | map({key: .[0], value: (.[1] | tonumber)}) | from_entries) as $stops
+  | ($map_files | map(select(.[0] == "zone")) | group_by(.[1] + "\t" + .[2])
+      | map({key: (.[0][1] + "\t" + .[0][2]), value: (map({key: .[3], value: $stops[.[4]]}) | from_entries)}) | from_entries) as $zones
+  | ($map_files | map(select(.[0] == "folder")) | group_by(.[1])
+      | map({key: .[0][1], value: (map({name: .[2], cells: ($cells[.[3]] // []), zones: ($zones[.[1] + "\t" + .[2]] // {})}) | sort_by(.name))})
+      | from_entries) as $folders
+  | ($map_files | map(select(.[0] == "loader") | {key: .[1], value: (.[2] == "true")}) | from_entries) as $loaders
 
   # Defaults as the game reads them: strings as written, empty too, and booleans true only when they say true in any case.
   | def sandbox($labels):
@@ -227,6 +290,8 @@ jq -n -c \
        tooltip: (if .translation == "" then null else $labels["Sandbox_" + .translation + "_tooltip"] end),
        current: (if .option | split(".") | any(secret) then null else $current[.env | ascii_downcase] end)};
 
+  def map_files($key): {mapFolders: ($folders[$key] // []), zoneLoader: (if $loaders | has($key) then $loaders[$key] else null end)};
+
   # error: why the game does not find the mod. requireEntries: the require entries as the game loads
   # them, untrimmed and with empty ones.
   ($mods | rows | map((.[0] + "/" + .[1]) as $key | [.[0], {
@@ -236,7 +301,7 @@ jq -n -c \
       error: (if .[3] == "-" then .[18] | text else null end),
       require: (.[13] | ids), requireEntries: [.[19] // "" | scan("([^,]*),") | .[0]],
       loadModAfter: (.[14] | ids), loadModBefore: (.[15] | ids), incompatible: (.[16] | ids),
-      maps: ($maps[$key] // []), sandbox: [($options[$key] // [])[] | sandbox($labels[$key] // {})]}])
+      maps: ($maps[$key] // []), sandbox: [($options[$key] // [])[] | sandbox($labels[$key] // {})]} + map_files($key)])
     | group_by(.[0]) | map({key: .[0][0], value: (map(.[1]) | sort_by(.folder))}) | from_entries) as $item_mods
 
   | [
@@ -261,6 +326,7 @@ jq -n -c \
           | select((.key | secret | not) and (.key == "DoLuaChecksum" or (.key | test("^anticheat"; "i")) or $words[.key | ascii_downcase])))
           | from_entries)},
       collections: [$tree[] | select(.children != null) | {id, title: $info[.id].title, children: [.children[].id]}],
+      game: map_files("game"),
       items: $items
     }
 ' > "${tmp}/mods.json"
