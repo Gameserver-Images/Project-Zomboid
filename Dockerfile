@@ -40,6 +40,13 @@ RUN for locale in en_US.UTF-8 ${EXTRA_LOCALES}; do \
 RUN mkdir -p "${STEAMAPPDIR}" "${HOMEDIR}/Zomboid" \
   && chown -R "${USER}:${USER}" "${HOMEDIR}"
 
+# Docker 29's default seccomp profile refuses the sockets of 32-bit programs, and SteamCMD is one until
+# it updates itself to Valve's 64-bit build. So it updates here, as the base image's 32-bit build, and
+# STEAM_PLATFORM makes steamcmd.sh start the 64-bit build from then on.
+ENV STEAM_PLATFORM=linux64
+RUN su "${USER}" -c "STEAM_PLATFORM=linux32 '${STEAMCMDDIR}/steamcmd.sh' +quit" \
+  && test -x "${STEAMCMDDIR}/linux64/steamcmd"
+
 COPY --chmod=755 scripts /server/scripts
 COPY --from=shim /src/no_file_watcher.so /usr/local/lib/no_file_watcher.so
 COPY --from=version /src/read_game_version.jar /usr/local/lib/read_game_version.jar

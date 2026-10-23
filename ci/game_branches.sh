@@ -8,7 +8,8 @@ set -euo pipefail
 
 if [ -n "${1:-}" ]; then
   info="$(<"$1")"
-elif ! info="$(docker run --rm cm2network/steamcmd:root bash -c \
+# The base image's SteamCMD is a 32-bit build, whose sockets Docker 29's default seccomp profile refuses.
+elif ! info="$(docker run --rm --security-opt seccomp=unconfined cm2network/steamcmd:root bash -c \
   '"${STEAMCMDDIR}/steamcmd.sh" +login anonymous +app_info_update 1 +app_info_print 380870 +quit')"; then
   echo "Error: SteamCMD failed to print the app info. The end of its output:" >&2
   tail -n 30 <<< "${info}" >&2
