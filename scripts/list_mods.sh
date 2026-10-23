@@ -170,7 +170,7 @@ sandbox_options < "${tmp}/standalone" | sed 's/^/option\t/' >> "${tmp}/files"
 # The map files of every mod whose mod.info the game reads, and of the game ("game"), for the mods page to
 # pick from in load order as the game does: of a mod's folders (the version folder, then common/), the first
 # with a map folder gives the map's cells (<x>_<y>.lotheader), the first with a zone file gives that file, and
-# the first with metazoneHandler.lua the zone loader.
+# the first with metazoneHandler.lua the zone loader, the first with spawnpoints.lua the map's spawn points.
 declare -A map_seen=() zone_seen=() loader_seen=()
 while IFS=$'\t' read -r key media; do
   handler="${media}/lua/server/metazones/metazoneHandler.lua"
@@ -187,10 +187,10 @@ while IFS=$'\t' read -r key media; do
       map_seen["${key}"$'\t'"${name}"]=1
       printf 'folder\t%s\t%s\t%s\n' "${key}" "${name}" "${map_dir}"
     fi
-    for file in objects.lua regions.lua roomtones.lua; do
+    for file in objects.lua regions.lua roomtones.lua spawnpoints.lua; do
       if [ -z "${zone_seen[${key}$'\t'${name}$'\t'${file}]+x}" ] && [ -f "${map_dir}/${file}" ]; then
         zone_seen["${key}"$'\t'"${name}"$'\t'"${file}"]=1
-        printf 'zone\t%s\t%s\t%s\t%s\n' "${key}" "${name}" "${file}" "${map_dir}/${file}"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$([ "${file}" = spawnpoints.lua ] && echo spawn || echo zone)" "${key}" "${name}" "${file}" "${map_dir}/${file}"
       fi
     done
   done
@@ -213,6 +213,32 @@ fi | LC_ALL=C awk -F '\t' '$2 ~ /^-?[0-9]+_-?[0-9]+\.lotheader$/ { split($2, at,
     END { if (folder != "") { flush(); print "]" } }
   ' > "${tmp}/cells"
 awk -F '\t' '$1 == "zone" { print $5 }' "${tmp}/map_files" | zone_stops > "${tmp}/zone_stops"
+# The spawn regions the server's file names, commented out or not; a region's points come from a map's
+# spawnpoints.lua (file) or from a file in the server's folder (serverfile).
+spawn_file="${HOMEDIR}/Zomboid/Server/${SERVERNAME:-pzserver}_spawnregions.lua"
+: > "${tmp}/regions"
+if [ -f "${spawn_file}" ]; then
+  LC_ALL=C awk -v OFS='\t' '
+    match($0, /name[ \t]*=[ \t]*"[^"]*"/) {
+      name = substr($0, RSTART, RLENGTH)
+      sub(/^[^"]*"/, "", name)
+      sub(/"$/, "", name)
+      if (!match($0, /(server)?file[ \t]*=[ \t]*"[^"]*"/)) next
+      kind = substr($0, RSTART, RLENGTH)
+      value = kind
+      sub(/[ \t]*=.*/, "", kind)
+      sub(/^[^"]*"/, "", value)
+      sub(/"$/, "", value)
+      print ($0 ~ /^[ \t]*--/ ? "true" : "false"), name, kind, value
+    }' "${spawn_file}" > "${tmp}/regions"
+fi
+{
+  awk -F '\t' '$1 == "spawn" { print $5 }' "${tmp}/map_files"
+  awk -F '\t' -v dir="${spawn_file%/*}" '$3 == "serverfile" && $4 !~ /\// { print dir "/" $4 }' "${tmp}/regions" \
+    | while IFS= read -r file; do [ ! -f "${file}" ] || printf '%s\n' "${file}"; done
+} | spawn_points > "${tmp}/spawns"
+server_spawn_point=""
+[ -f "${ini_file}" ] && server_spawn_point="$(ini_value "${ini_file}" SpawnPoint)"
 
 bash "${SCRIPT_DIR}/list_env.sh" --tsv | awk -F '\t' '$1 == "ini" || $1 == "sandbox"' > "${tmp}/settings"
 
@@ -232,7 +258,11 @@ jq -n -c \
   --rawfile settings "${tmp}/settings" \
   --rawfile map_files "${tmp}/map_files" \
   --rawfile cells "${tmp}/cells" \
-  --rawfile zone_stops "${tmp}/zone_stops" '
+  --rawfile zone_stops "${tmp}/zone_stops" \
+  --rawfile regions "${tmp}/regions" \
+  --rawfile spawns "${tmp}/spawns" \
+  --arg spawn_dir "${spawn_file%/*}" \
+  --arg spawn_point "${server_spawn_point}" '
   def lines: split("\n") | map(select(length > 0));
   def rows: lines | map(split("\t"));
   def text: if . == "" then null else . end;
@@ -270,8 +300,11 @@ jq -n -c \
   | ($zone_stops | rows | map({key: .[0], value: (.[1] | tonumber)}) | from_entries) as $stops
   | ($map_files | map(select(.[0] == "zone")) | group_by(.[1] + "\t" + .[2])
       | map({key: (.[0][1] + "\t" + .[0][2]), value: (map({key: .[3], value: $stops[.[4]]}) | from_entries)}) | from_entries) as $zones
+  | ($spawns | rows | group_by(.[0]) | map({key: .[0][0], value: map(.[1:] | map(tonumber))}) | from_entries) as $points
+  | ($map_files | map(select(.[0] == "spawn") | {key: (.[1] + "\t" + .[2]), value: ($points[.[4]] // [])}) | from_entries) as $map_spawns
   | ($map_files | map(select(.[0] == "folder")) | group_by(.[1])
-      | map({key: .[0][1], value: (map({name: .[2], cells: ($cells[.[3]] // []), zones: ($zones[.[1] + "\t" + .[2]] // {})}) | sort_by(.name))})
+      | map({key: .[0][1], value: (map({name: .[2], cells: ($cells[.[3]] // []), zones: ($zones[.[1] + "\t" + .[2]] // {}),
+          spawns: $map_spawns[.[1] + "\t" + .[2]]}) | sort_by(.name))})
       | from_entries) as $folders
   | ($map_files | map(select(.[0] == "loader") | {key: .[1], value: (.[2] == "true")}) | from_entries) as $loaders
 
@@ -324,7 +357,11 @@ jq -n -c \
         # Only what the mods page reads: the Lua checksum, the anti-cheat settings and the settings a workshop page names.
         options: ($settings | map(select(.[0] == "ini") | {key: (.[1] | ltrimstr("INI_")), value: (.[2] // "")}
           | select((.key | secret | not) and (.key == "DoLuaChecksum" or (.key | test("^anticheat"; "i")) or $words[.key | ascii_downcase])))
-          | from_entries)},
+          | from_entries),
+        spawnPoint: ($spawn_point | text),
+        spawnRegions: [$regions | rows[] | {name: .[1], commented: (.[0] == "true"),
+          file: (if .[2] == "file" then .[3] else null end), serverfile: (if .[2] == "serverfile" then .[3] else null end),
+          points: (if .[2] == "serverfile" then $points[$spawn_dir + "/" + .[3]] // [] else null end)}]},
       collections: [$tree[] | select(.children != null) | {id, title: $info[.id].title, children: [.children[].id]}],
       game: map_files("game"),
       items: $items

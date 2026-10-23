@@ -151,6 +151,12 @@ cells="$(jq '[.cells[]? | .[2] - .[1] + 1] | add // 0' <<< "${vanilla}")"
 [ "${cells}" -gt 0 ] || fail "list-mods found no cells of the vanilla map: ${vanilla}"
 jq -e '[.zones[]? | select(. != null)] == []' <<< "${vanilla}" > /dev/null || fail "list-mods says the game stops at a zone of its own map: ${vanilla}"
 echo "::notice title=Map cells::${label}: the vanilla map has ${cells} cells in $(jq '.cells | length' <<< "${vanilla}") runs, the zone loader fails on zones without coordinates: $(jq '.game.zoneLoader' <<< "${mods_json}"), list-mods printed $(wc -c <<< "${mods_json}") bytes"
+# And the points of the server's spawn regions, which come from the game's own spawnpoints.lua files.
+spawns="$(jq -c '(.game.mapFolders | map({key: .name, value: (.spawns // [] | length)}) | from_entries) as $points
+  | [.server.spawnRegions[] | select(.file != null and (.commented | not))
+    | {name, points: $points[.file | capture("^media/maps/(?<map>.+)/spawnpoints\\.lua$").map]}]' <<< "${mods_json}")"
+jq -e 'length > 0 and all(.points > 0)' <<< "${spawns}" > /dev/null || fail "list-mods found no spawn points for a spawn region: ${spawns}"
+echo "::notice title=Spawn points::${label}: $(jq -r 'map("\(.name) \(.points)") | join(", ")' <<< "${spawns}")"
 
 stop_server 1
 

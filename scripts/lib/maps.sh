@@ -213,6 +213,52 @@ zone_stops() {
   '
 }
 
+# The spawn points of spawnpoints.lua files, in squares, as SpawnPoints.parsePoint reads them: worldX and
+# worldY count cells of 300 squares on both builds, posX and posY squares within them, or squares of the
+# world without them; posZ is the level, 0 when it is missing. Points are read from one-line tables, as
+# the game and WorldEd write them; points named by position ("center") and points made by code aren't.
+spawn_points() {
+  # stdin = paths of spawnpoints.lua files. Prints "<path>\t<x>\t<y>\t<z>" for each point, once.
+  LC_ALL=C awk '
+    function num(t, key) {
+      if (!match(t, "[^A-Za-z0-9_]" key "[ \t]*=[ \t]*-?[0-9]+(\\.[0-9]+)?")) return ""
+      t = substr(t, RSTART, RLENGTH)
+      sub(/^[^=]*=[ \t]*/, "", t)
+      return t
+    }
+    {
+      path = $0
+      while ((getline line < path) > 0) {
+        sub(/\r$/, "", line)
+        sub(/--.*/, "", line)
+        while (match(line, /\{[^{}]*\}/)) {
+          t = " " substr(line, RSTART + 1, RLENGTH - 2) " "
+          line = substr(line, RSTART + RLENGTH)
+          px = num(t, "posX")
+          py = num(t, "posY")
+          if (px == "" || py == "") continue
+          wx = num(t, "worldX")
+          wy = num(t, "worldY")
+          if (wx == "" && wy == "") {
+            x = int(px)
+            y = int(py)
+          } else if (wx != "" && wy != "") {
+            x = int(wx) * 300 + int(px)
+            y = int(wy) * 300 + int(py)
+          } else continue
+          z = num(t, "posZ")
+          z = z == "" ? 0 : int(z)
+          if (!((path, x, y, z) in seen)) {
+            seen[path, x, y, z]
+            print path "\t" x "\t" y "\t" z
+          }
+        }
+      }
+      close(path)
+    }
+  '
+}
+
 # Warns about the first map the game stops loading zones at, and the maps that lose their zones by it.
 map_zone_warnings() {
   # stdin = per entry of Map=: map, item, folder, objects.lua, regions.lua, roomtones.lua and the mod

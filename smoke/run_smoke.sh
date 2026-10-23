@@ -866,6 +866,28 @@ EOF
   for cell in 0_0 1_0 -1_0 0_1; do touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/${cell}.lotheader"; done
   printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' '}' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/objects.lua"
   printf '%s\n' "print('..v.x..','..v.y..','..v.z)" 'local w = v.x + v.width' > "${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
+  # Spawn points in both forms, once each however often professions repeat them; a table without posY,
+  # one with only worldX, a comment and a point by position don't count.
+  mod_file "${multi}/common/media/maps/Variant Map/spawnpoints.lua" <<'EOF2'
+function SpawnPoints()
+	return {
+		unemployed = {
+			{ worldX = 10, worldY = 5, posX = 12, posY = 34, posZ = 1 },
+			{ posX = 2600, posY = 1290 }, { posX = 2601, posY = 1290, posZ = 0 },
+			-- { posX = 9, posY = 9 },
+			{ posX = 7 }, { worldX = 1, posX = 5, posY = 5 }, { position = "center" },
+		},
+		chef = {
+			{ posX = 2600, posY = 1290 },
+		},
+	}
+end
+EOF2
+  printf '%s\n' 'function SpawnPoints()' 'return { unemployed = { { worldX = 0, worldY = 1, posX = 150, posY = 20 } } }' 'end' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/spawnpoints.lua"
+  printf '%s\n' 'function SpawnRegions()' '	return {' '		{ name = "Muldraugh, KY", file = "media/maps/Muldraugh, KY/spawnpoints.lua" },' \
+    '--		{ name = "Variant Map", file = "media/maps/Variant Map/spawnpoints.lua" },' '		{ name = "Bar", serverfile = "pzserver_spawnpoints.lua" },' \
+    '		{ name = "Gone", serverfile = "missing_spawnpoints.lua" },' '	}' 'end' > "${SERVER}/pzserver_spawnregions.lua"
+  printf '%s\n' 'function SpawnPoints()' 'return { unemployed = { { worldX = 40, worldY = 22, posX = 67, posY = 201 } } }' 'end' > "${SERVER}/pzserver_spawnpoints.lua"
   # A byte order mark hides the id= line from the game.
   printf '\357\273\277id=MultiAddon\r\nname=Addon\r\n' | mod_file 101/mods/Addon/42/mod.info
   printf '%s\r\n' 'VERSION = 1,' 'option Addon.Flag' '{' 'type = boolean,' 'default = false,' 'translation = Addon_Flag,' '}' \
@@ -946,7 +968,7 @@ EOF
   (PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' FAKE_STEAM_ABOUT_106='Set PVP=false and raise itemnumberslimitpercontainer; PublicNameX, Password, RCONPort, DiscordEnable and server_browser_announced_ip stay.' \
     bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err") || { fail "list-mods failed"; cat "${WORK}/err" >&2; return; }
   jq -e '.format == 2 and .gameVersion == "42.21.0" and .workshopIds == ["900", "104"]' "${out}" > /dev/null || fail "wrong header"
-  expect_eq "$(jq -c '.server | del(.options)' "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
+  expect_eq "$(jq -c '.server | del(.options, .spawnPoint, .spawnRegions)' "${out}")" '{"mods":["\\MultiMod","2392709985\\TsarLib","\\OldMod"],"map":["Variant Map","Muldraugh, KY"],"workshopItems":["101","102","105"]}'
   expect_eq "$(jq -c .server.options "${out}")" \
     '{"PVP":"true","DoLuaChecksum":"true","ItemNumbersLimitPerContainer":"100","AntiCheatSafety":"2"}'
   grep -qiE 'hunter2|rcon-secret|webhook-secret|space-secret|\(set\)|27654|chat-channel-secret|channel-id-secret|203\.0\.113\.7|api-token-secret|My PZ Server' "${out}" \
@@ -958,9 +980,13 @@ EOF
   expect_eq "$(jq -c '.items[3] | [.title, .description, .tags, .updated, .size]' "${out}")" '[null,null,null,null,null]'
   expect_eq "$(jq -c '.items[3].mods[0].sandbox | map([.env, .label])' "${out}")" '[["SANDBOX_Hidden__X",null]]'
   expect_eq "$(jq -S -c '.items[0].mods[1] | [.mapFolders, .zoneLoader]' "${out}")" \
-    '[[{"cells":[],"name":"Common Map","zones":{}},{"cells":[],"name":"Muldraugh, KY","zones":{}},{"cells":[[5,10,12],[6,10,10]],"name":"Variant Map","zones":{"objects.lua":3,"regions.lua":null}}],false]'
-  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","zones":{"objects.lua":null}}],"zoneLoader":true}'
+    '[[{"cells":[],"name":"Common Map","spawns":null,"zones":{}},{"cells":[],"name":"Muldraugh, KY","spawns":null,"zones":{}},{"cells":[[5,10,12],[6,10,10]],"name":"Variant Map","spawns":[[3012,1534,1],[2600,1290,0],[2601,1290,0]],"zones":{"objects.lua":3,"regions.lua":null}}],false]'
+  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","spawns":[[150,320,0]],"zones":{"objects.lua":null}}],"zoneLoader":true}'
+  expect_eq "$(jq -c '.server | [.spawnPoint, .spawnRegions]' "${out}")" \
+    '[null,[{"name":"Muldraugh, KY","commented":false,"file":"media/maps/Muldraugh, KY/spawnpoints.lua","serverfile":null,"points":null},{"name":"Variant Map","commented":true,"file":"media/maps/Variant Map/spawnpoints.lua","serverfile":null,"points":null},{"name":"Bar","commented":false,"file":null,"serverfile":"pzserver_spawnpoints.lua","points":[[12067,6801,0]]},{"name":"Gone","commented":false,"file":null,"serverfile":"missing_spawnpoints.lua","points":[]}]]'
   expect_eq "$(jq -c '[.items[5].mods[0] | .mapFolders, .zoneLoader]' "${out}")" '[[],null]'
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '100,200,0'
+  expect_eq "$(PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" 2> /dev/null | jq -c .server.spawnPoint)" '"100,200,0"'
   expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox, .mapFolders, .zoneLoader)' "${out}")" \
     '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"error":null,"require":["StarlitLibrary","2392709985TsarLib","PlainReq"],"requireEntries":["StarlitLibrary","2392709985TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
   expect_eq "$(jq -c '.items[0].mods[1].sandbox | map([.env, .type, .default, .current])' "${out}")" \
