@@ -18,6 +18,60 @@ expect_eq() {
   [ "$1" = "$2" ] || fail "expected '$2', got '$1'"
 }
 
+# The room reader runs on this system's Java when the scripts start it with the game's.
+export SMOKE_ROOMS_JAR="${WORK}/read_spawn_rooms.jar"
+mkdir -p "${WORK}/rooms"
+if ! env -u JAVA_TOOL_OPTIONS javac --release 17 -d "${WORK}/rooms" "${REPO}/rooms/ReadSpawnRooms.java" \
+  || ! env -u JAVA_TOOL_OPTIONS jar --create --file "${SMOKE_ROOMS_JAR}" --main-class ReadSpawnRooms -C "${WORK}/rooms" .; then
+  echo "FAIL: the room reader did not compile (the tests need a JDK)" >&2
+  FAILED=1
+fi
+
+# Writes a cell header the way the game's map tools do: $1 = file, $2 = 42 (version 1, with the magic),
+# 42.0 (version 0, without) or 41, then one argument per room, "room <name> <level> <objects> <x> <y> <w> <h>...",
+# or per building, "building <room index>...".
+lotheader() {
+  local file="$1" layout="$2" item i
+  shift 2
+  local -a rooms=() buildings=() words
+  for item; do
+    case "${item}" in
+      room\ *) rooms+=("${item}") ;;
+      building\ *) buildings+=("${item}") ;;
+    esac
+  done
+  int() {
+    local v=$(( $1 & 0xFFFFFFFF ))
+    # shellcheck disable=SC2059 # the format is the bytes
+    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( v & 255 )) $(( v >> 8 & 255 )) $(( v >> 16 & 255 )) $(( v >> 24 & 255 )))"
+  }
+  {
+    if [ "${layout}" = 42 ]; then printf LOTH; int 1; else int 0; fi
+    int 2
+    printf 'tile_one\r\ntile_two\n'
+    [ "${layout}" = 42 ] || printf '\001'
+    if [ "${layout}" = 41 ]; then int 10; int 10; else int 8; int 8; fi
+    if [ "${layout}" = 42 ]; then int -1; int 2; else int 3; fi
+    int "${#rooms[@]}"
+    for item in "${rooms[@]}"; do
+      read -r -a words <<< "${item}"
+      printf '%s\n' "${words[1]}"
+      int "${words[2]}"
+      int $(( (${#words[@]} - 4) / 4 ))
+      for ((i = 4; i < ${#words[@]}; i++)); do int "${words[i]}"; done
+      int "${words[3]}"
+      for ((i = 0; i < words[3] * 3; i++)); do int 7; done
+    done
+    int "${#buildings[@]}"
+    for item in "${buildings[@]}"; do
+      read -r -a words <<< "${item}"
+      int $(( ${#words[@]} - 1 ))
+      for ((i = 1; i < ${#words[@]}; i++)); do int "${words[i]}"; done
+    done
+    head -c "$([ "${layout}" = 41 ] && echo 900 || echo 1024)" /dev/zero
+  } > "${file}"
+}
+
 # Each test runs in a subshell with a fresh fake HOMEDIR/STEAMAPPDIR and no INI_/SANDBOX_ leftovers.
 new_env() {
   rm -rf "${WORK:?}/home"
@@ -68,11 +122,12 @@ done
 printf 'Unloading Steam API...OK'
 EOF
   chmod +x "${STEAMCMDDIR}/steamcmd.sh"
-  # The game's Java running the version reader, which reads FAKE_GAME_VERSION here. A JVM can warn on
-  # stderr.
+  # The game's Java running the version reader, which reads FAKE_GAME_VERSION here, or the room reader. A
+  # JVM can warn on stderr.
   printf '%s\n' '{"mainClass": "zombie/network/GameServer", "classpath": ["java/.", "java/projectzomboid.jar"]}' > "${STEAMAPPDIR}/ProjectZomboid64.json"
   cat > "${STEAMAPPDIR}/jre64/bin/java" <<'EOF'
 #!/bin/bash
+[[ "${2:-}" == */read_spawn_rooms.jar ]] && exec java -jar "${SMOKE_ROOMS_JAR}" "${@:3}"
 [ -n "${FAKE_GAME_VERSION:-}" ] || { echo "zombie/core/Core.class has no int constant buildVersion" >&2; exit 1; }
 echo "OpenJDK 64-Bit Server VM warning: a warning" >&2
 echo "${FAKE_GAME_VERSION}"
@@ -855,6 +910,9 @@ EOF
   local maps="${STEAMAPPDIR}/steamapps/workshop/content/108600/${multi}" cell
   for cell in 10_5 11_5 12_5 10_6 x_1 1_2_3; do touch "${maps}/42.21/media/maps/Variant Map/${cell}.lotheader"; done
   touch "${maps}/42.21/media/maps/Variant Map/chunkdata_10_5.bin" "${maps}/42.21/media/maps/Variant Map/13_5.lotheader.bak"
+  # A building holds the spawn point 2600,1290 but not the one beside it.
+  lotheader "${maps}/42.21/media/maps/Variant Map/10_5.lotheader" 42 "room shop 0 0 40 10 1 1" "building 0"
+  lotheader "${maps}/42.21/media/maps/Variant Map/11_5.lotheader" 42
   mkdir -p "${maps}/common/media/maps/Variant Map"
   touch "${maps}/common/media/maps/Variant Map/99_99.lotheader"
   printf '%s\n' 'zones = {}' 'regions = {' '}' | mod_file "${multi}/42.21/media/maps/Variant Map/regions.lua"
@@ -863,7 +921,8 @@ EOF
     | mod_file "${multi}/common/media/maps/Variant Map/objects.lua"
   printf '%s\n' "local s = v.x .. v.y" | mod_file "${multi}/common/media/lua/server/metazones/metazoneHandler.lua"
   mkdir -p "${STEAMAPPDIR}/media/maps/Muldraugh, KY" "${STEAMAPPDIR}/media/lua/server/metazones"
-  for cell in 0_0 1_0 -1_0 0_1; do touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/${cell}.lotheader"; done
+  for cell in 0_0 1_0 -1_0; do touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/${cell}.lotheader"; done
+  lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_1.lotheader" 42 "room hall 0 0 150 64 1 1" "building 0"
   printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' '}' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/objects.lua"
   printf '%s\n' "print('..v.x..','..v.y..','..v.z)" 'local w = v.x + v.width' > "${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
   # Spawn points in both forms, once each however often professions repeat them; a table without posY,
@@ -980,13 +1039,17 @@ EOF
   expect_eq "$(jq -c '.items[3] | [.title, .description, .tags, .updated, .size]' "${out}")" '[null,null,null,null,null]'
   expect_eq "$(jq -c '.items[3].mods[0].sandbox | map([.env, .label])' "${out}")" '[["SANDBOX_Hidden__X",null]]'
   expect_eq "$(jq -S -c '.items[0].mods[1] | [.mapFolders, .zoneLoader]' "${out}")" \
-    '[[{"cells":[],"name":"Common Map","spawns":null,"zones":{}},{"cells":[],"name":"Muldraugh, KY","spawns":null,"zones":{}},{"cells":[[5,10,12],[6,10,10]],"name":"Variant Map","spawns":[[3012,1534,1],[2600,1290,0],[2601,1290,0]],"zones":{"objects.lua":3,"regions.lua":null}}],false]'
-  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","spawns":[[150,320,0]],"zones":{"objects.lua":null}}],"zoneLoader":true}'
+    '[[{"cells":[],"name":"Common Map","rooms":[],"spawns":null,"zones":{}},{"cells":[],"name":"Muldraugh, KY","rooms":[],"spawns":null,"zones":{}},{"cells":[[5,10,12],[6,10,10]],"name":"Variant Map","rooms":[[2600,1290,0,2600,1290]],"spawns":[[3012,1534,1],[2600,1290,0],[2601,1290,0]],"zones":{"objects.lua":3,"regions.lua":null}}],false]'
+  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","rooms":[[150,320,0,150,320]],"spawns":[[150,320,0]],"zones":{"objects.lua":null}}],"zoneLoader":true}'
   expect_eq "$(jq -c '.server | [.spawnPoint, .spawnRegions]' "${out}")" \
     '[null,[{"name":"Muldraugh, KY","commented":false,"file":"media/maps/Muldraugh, KY/spawnpoints.lua","serverfile":null,"points":null},{"name":"Variant Map","commented":true,"file":"media/maps/Variant Map/spawnpoints.lua","serverfile":null,"points":null},{"name":"Bar","commented":false,"file":null,"serverfile":"pzserver_spawnpoints.lua","points":[[12067,6801,0]]},{"name":"Gone","commented":false,"file":null,"serverfile":"missing_spawnpoints.lua","points":[]}]]'
   expect_eq "$(jq -c '[.items[5].mods[0] | .mapFolders, .zoneLoader]' "${out}")" '[[],null]'
+  # SpawnPoint is checked too; it is on the game's cell 0, 0, whose header can't be read.
   set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '100,200,0'
-  expect_eq "$(PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" 2> /dev/null | jq -c .server.spawnPoint)" '"100,200,0"'
+  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" > "${WORK}/point" 2> "${WORK}/point-err"
+  expect_eq "$(jq -c '[.server.spawnPoint, .game.mapFolders[0].rooms]' "${WORK}/point")" '["100,200,0",[[100,200,0],[150,320,0,150,320]]]'
+  expect_eq "$(cat "${WORK}/point-err")" "Warning: ${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_0.lotheader could not be read (java.io.EOFException), so the mods page does not check the spawn points on its cell"
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint ''
   expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox, .mapFolders, .zoneLoader)' "${out}")" \
     '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"error":null,"require":["StarlitLibrary","2392709985TsarLib","PlainReq"],"requireEntries":["StarlitLibrary","2392709985TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
   expect_eq "$(jq -c '.items[0].mods[1].sandbox | map([.env, .type, .default, .current])' "${out}")" \
@@ -1021,9 +1084,12 @@ EOF
   grep -q '^Error: .*STEAM_API_KEY' "${WORK}/err" || fail "the wrong key was not explained"
   (PATH="${WORK}/bin:${PATH}" FAKE_STEAM_PARTIAL=1000 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> /dev/null) && fail "list-mods succeeded with an incomplete first batch"
 
-  # Build 41 loads the mod.info in the mod folder itself.
+  # Build 41 loads the mod.info in the mod folder itself, and its cells are 300 squares: the game's 0_1 has a
+  # building at 150,320 there.
   FAKE_GAME_VERSION=41.78.16
+  lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_1.lotheader" 41 "room hall 0 0 150 20 1 1" "building 0"
   PATH="${WORK}/bin:${PATH}" bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" || fail "list-mods failed on Build 41"
+  expect_eq "$(jq -c '.game.mapFolders[0].rooms' "${out}")" '[[150,320,0,150,320]]'
   expect_eq "$(jq -c '[.gameVersion, (.items[] | select(.id | length == 3) | .mods[] | [.folder, .versionFolder, .modVersion, .maps])]' "${out}")" \
     '["41.78.16",["Addon",null,null,[]],["Multi Version","",null,[]],["Old Mod","",null,["Old Map"]],["Hidden",null,null,[]],["Loose",null,null,[]],["No Id",null,null,[]],["No Version",null,null,[]],["Bad",null,null,[]],["Capped",null,null,[]],["Spaces",null,null,[]]]'
 
@@ -1891,6 +1957,40 @@ test_game_version() {
   expect_eq "$(cat "${WORK}/out")" "${STEAMAPPDIR}/ProjectZomboid64.json is missing or lists no classpath"
 }
 
+# The buildings that hold spawn points, read from cell headers in the game's layouts: Build 42 with and
+# without the magic, Build 41's, a broken one and a Build 41 one where Build 42 wants its own.
+test_spawn_rooms() {
+  TEST='spawn rooms'
+  new_env
+  local maps="${WORK}/maps" out
+  mkdir -p "${maps}/A" "${maps}/B" "${maps}/C" "${maps}/D" "${maps}/E"
+  # A room counts only in a building and on its level; an "emptyoutside" one never; a building's corner is
+  # the least of all its rooms, "emptyoutside" too.
+  lotheader "${maps}/A/1_2.lotheader" 42 "room kitchen 0 1 10 20 5 5" "room emptyoutside 0 0 0 0 50 50" "room attic 1 0 10 20 5 5" \
+    "room loose 0 0 100 100 5 5" "room shed 0 0 40 20 2 2 60 20 2 2" "building 0 1 2" "building 0" "building 4"
+  lotheader "${maps}/A/-1_0.lotheader" 42 "room hall 0 0 250 10 4 4" "building 0"
+  lotheader "${maps}/B/1_2.lotheader" 42.0 "room bedroom 0 0 10 20 5 5" "building 0"
+  lotheader "${maps}/C/whole.lotheader" 42 "room kitchen 0 1 10 20 5 5" "building 0"
+  head -c 60 "${maps}/C/whole.lotheader" > "${maps}/C/1_2.lotheader"
+  lotheader "${maps}/D/1_2.lotheader" 41 "room kitchen 0 0 10 20 5 5" "building 0"
+  out="$(printf '%s\n' '266	532	0' '270	536	0' '271	532	0' '266	532	1' '266	532	2' '290	540	0' '356	612	0' '317	533	0' '700	700	0' '-5	11	0' \
+    | spawn_rooms 256 "${maps}/A" "${maps}/B" 2> "${WORK}/err")" || fail "the reader failed: $(cat "${WORK}/err")"
+  expect_eq "${out}" "$(printf '%s\n' \
+    "${maps}/A	266	532	0	256	512" "${maps}/A	266	532	0	266	532" "${maps}/A	270	536	0	256	512" "${maps}/A	270	536	0	266	532" \
+    "${maps}/A	266	532	1	256	512" "${maps}/A	317	533	0	296	532" "${maps}/A	-5	11	0	-6	10" \
+    "${maps}/B	266	532	0	266	532" "${maps}/B	270	536	0	266	532")"
+  # A header it can't read is named once, with each point on its cell.
+  expect_eq "$(printf '%s\n' '266	532	0' '270	536	0' '700	700	0' | spawn_rooms 256 "${maps}/C" "${maps}/D")" "$(printf '%s\n' \
+    "!	${maps}/C	1_2.lotheader	java.io.EOFException" "?	${maps}/C	266	532	0" "?	${maps}/C	270	536	0" \
+    "!	${maps}/D	1_2.lotheader	java.io.IOException: invalid chunk width 10x10" "?	${maps}/D	266	532	0" "?	${maps}/D	270	536	0")"
+  # Build 41 takes the first room with the point, in file order, and a room outside any building is one.
+  lotheader "${maps}/E/0_0.lotheader" 41 "room loose 0 0 10 10 5 5" "room shop 0 0 10 10 5 5" "room store 0 0 50 50 5 5" "building 1 2"
+  expect_eq "$(printf '%s\n' '12	12	0' '52	52	0' | spawn_rooms 300 "${maps}/E")" "${maps}/E	52	52	0	10	10"
+  # A cell size it doesn't know is an error, with what the reader said.
+  spawn_rooms 128 "${maps}/A" < /dev/null > /dev/null 2> "${WORK}/err" && fail "a cell of 128 squares was taken"
+  grep -q '^usage: read_spawn_rooms.jar <256 or 300> <map folder>...$' "${WORK}/err" || fail "no usage: $(cat "${WORK}/err")"
+}
+
 test_list_env() {
   TEST=list-env
   new_env
@@ -2149,7 +2249,7 @@ test_vars_documented() {
   done < "${SCRIPT_DIR}/vars.tsv"
   for name in $(grep -rhoE '\$\{[A-Z][A-Z0-9_]+(:-|\+x|\})' "${SCRIPT_DIR}" | grep -oE '[A-Z][A-Z0-9_]+' | sort -u); do
     case "${name}" in
-      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|IMAGE_SOURCE|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|KEY|VALUE|NAME|LOG_*) continue ;;
+      HOMEDIR|STEAMAPPDIR|STEAMAPPID|STEAMCMDDIR|SERVERNAME|SCRIPT_DIR|LD_LIBRARY_PATH|LD_PRELOAD|IMAGE_SOURCE|SERVER_*|SHUTDOWN_*|CONSOLE_FD|ARGS|EPOCHSECONDS|VANILLA_MAP|VERSION_READER|ROOMS_READER|KEY|VALUE|NAME|LOG_*) continue ;;
     esac
     grep -q "^${name}	" "${SCRIPT_DIR}/vars.tsv" || fail "${name} is read but not in vars.tsv"
   done
@@ -2446,7 +2546,7 @@ EOF
   expect_eq "$?" 0
 }
 
-for t in test_ini test_sandbox test_sandbox_mods test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_sandbox_mods test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_spawn_rooms test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 

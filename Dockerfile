@@ -8,11 +8,16 @@ RUN apt-get update \
 COPY shim/no_file_watcher.c /src/
 RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC -o /src/no_file_watcher.so /src/no_file_watcher.c
 
-# Runs on the game's own Java, which is 17 on Build 41.
+# These two run on the game's own Java, which is 17 on Build 41.
 FROM eclipse-temurin:25-jdk AS version
 COPY version/ReadGameVersion.java /src/
 RUN javac --release 17 -Xlint:all,-serial -Werror -d /src/classes /src/ReadGameVersion.java \
   && jar --create --file /src/read_game_version.jar --main-class ReadGameVersion -C /src/classes .
+
+FROM eclipse-temurin:25-jdk AS rooms
+COPY rooms/ReadSpawnRooms.java /src/
+RUN javac --release 17 -Xlint:all,-serial -Werror -d /src/classes /src/ReadSpawnRooms.java \
+  && jar --create --file /src/read_spawn_rooms.jar --main-class ReadSpawnRooms -C /src/classes .
 
 FROM cm2network/steamcmd:root
 
@@ -50,6 +55,7 @@ RUN su "${USER}" -c "STEAM_PLATFORM=linux32 '${STEAMCMDDIR}/steamcmd.sh' +quit" 
 COPY --chmod=755 scripts /server/scripts
 COPY --from=shim /src/no_file_watcher.so /usr/local/lib/no_file_watcher.so
 COPY --from=version /src/read_game_version.jar /usr/local/lib/read_game_version.jar
+COPY --from=rooms /src/read_spawn_rooms.jar /usr/local/lib/read_spawn_rooms.jar
 # The release workflow passes the mods page of its docs site and the URL of its repository.
 ARG MODS_PAGE=""
 ARG IMAGE_SOURCE=""

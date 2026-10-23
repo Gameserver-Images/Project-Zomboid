@@ -259,6 +259,19 @@ spawn_points() {
   '
 }
 
+ROOMS_READER=/usr/local/lib/read_spawn_rooms.jar
+
+spawn_rooms() {
+  # $1 = squares per cell (256 or 300), then map folders; stdin = points, "<x>\t<y>\t<z>". Prints the
+  # buildings of the folders that hold the points, as read_spawn_rooms.jar does with the game's Java, or
+  # fails with what it said. The JVM would announce the options in these variables on stderr.
+  local why status=0
+  { why="$(env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS \
+    "${STEAMAPPDIR}/jre64/bin/java" -jar "${ROOMS_READER}" "$@" 2>&1 >&3)" || status=$?; } 3>&1
+  [ "${status}" = 0 ] || printf '%s\n' "${why}" >&2
+  return "${status}"
+}
+
 # Warns about the first map the game stops loading zones at, and the maps that lose their zones by it.
 map_zone_warnings() {
   # stdin = per entry of Map=: map, item, folder, objects.lua, regions.lua, roomtones.lua and the mod

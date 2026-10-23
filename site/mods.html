@@ -278,7 +278,7 @@
             <ul id="other-map-list" class="notes" hidden></ul>
             <div id="spawn-box" hidden>
               <h3>Spawn regions</h3>
-              <p class="hint">The regions the server offers new characters once it starts with these mods: the image adds the spawn points of the maps of the mods that load and removes those of other mods' maps. A region whose line is commented out with <code>--</code> stays out.</p>
+              <p class="hint">The regions the server offers new characters once it starts with these mods: the image adds the spawn points of the maps of the mods that load and removes those of other mods' maps. A region whose line is commented out with <code>--</code> stays out. A point is marked where no map has its cell, or no building the game keeps with this <code>Map=</code> holds it.</p>
               <ul id="spawn-list" class="notes"></ul>
             </div>
           </section>
@@ -373,7 +373,7 @@
     ['setting', 'Server settings the mods ask for', 'Their workshop pages ask for values other than the ones the server has or the .env lines set. Server settings has the INI_ line for each.'],
     ['zones', 'Maps that stop the map zones', 'The game loads map zones (car spawns, animals, basements, water and the like) from the last map in Map= to the first, and stops at the first zone it fails on, so the maps above that one in Map= lose theirs. Maps says what to move.'],
     ['cells', 'Maps of different items that share cells', () => `${sharedRule()} Maps shows where.`],
-    ['spawns', 'Spawn points on cells another map comes first on, or no map has', 'Where another map comes first in Map=, the building at a spawn point can be another than the one its region meant, or none; on a cell no map has there is nothing. Maps shows the points.'],
+    ['spawns', 'Spawn points outside buildings or on no map', 'The game keeps zombies and story events out of the building a new character starts in, so a point outside any building gets neither, and one on an upper floor may drop the character. Which buildings there are depends on Map=: where maps share cells, the buildings of a map earlier in it win. On a cell no map has there is nothing. With list-mods from an older image the buildings are unknown, and points where another map than their own comes first are listed instead. Maps shows the points.'],
     ['folders', 'Maps with fewer cells than one of their folders', "The game reads all of a map's cells from one folder: the one of the mod loaded last that has a folder of that name. For these maps, another mod's or the game's folder has more cells."],
     ['duplicate', 'Mod IDs in several items'],
     ['unknown', 'Enabled but not in any downloaded item'],
@@ -557,9 +557,10 @@
     return o;
   }
 
-  // A mod's or the game's map folders as list-mods read them: per map, its cells as runs [y, first x, last x] and, per
-  // zone file it has, the line of the zone the game stops at (null when it reads the whole file). budget is what is
-  // left of MAX_CELLS.
+  // A mod's or the game's map folders as list-mods read them: per map, its cells as runs [y, first x, last x], per
+  // zone file it has, the line of the zone the game stops at (null when it reads the whole file), its spawn points, and
+  // per spawn point list-mods knows ("x,y,z") the corners of the map's buildings that hold it, or null for a point on a
+  // cell header it couldn't read (all null for list-mods from an older image). budget is what is left of MAX_CELLS.
   function mapFolders(raw, budget) {
     const folders = new Map();
     for (const f of list(raw)) {
@@ -578,7 +579,14 @@
       }
       const spawns = Array.isArray(f.spawns)
         ? f.spawns.filter(pt => Array.isArray(pt) && pt.length === 3 && pt.every(v => Number.isInteger(v) && Math.abs(v) < CELL_LIMIT * 256)) : null;
-      folders.set(f.name, { name: f.name, runs, zones, spawns, keys: null });
+      const rooms = Array.isArray(f.rooms) ? new Map() : null;
+      for (const r of rooms ? f.rooms : []) {
+        if (!Array.isArray(r) || (r.length !== 3 && r.length !== 5) || !r.every(v => Number.isInteger(v) && Math.abs(v) < CELL_LIMIT * 300)) continue;
+        const id = r.slice(0, 3).join(',');
+        if (r.length === 3) rooms.set(id, null);
+        else rooms.set(id, [...rooms.get(id) || [], r.slice(3)]);
+      }
+      folders.set(f.name, { name: f.name, runs, zones, spawns, rooms, keys: null });
     }
     return folders;
   }
@@ -1280,9 +1288,10 @@
       }
       return {
         ...entry, index, known: Boolean(source), item: source ? source.inst?.itemId ?? 'game' : null, keys: folder ? folderKeys(folder) : [],
-        stop, over: 0, shares: new Map(), notes,
+        rooms: folder ? folder.rooms : null, stop, over: 0, shares: new Map(), notes,
       };
     });
+    for (const m of maps) m.keySet = new Set(m.keys);
     const byName = new Map(maps.map(m => [m.name, m]));
     const goTo = name => () => goToMap(name);
 
@@ -1338,9 +1347,40 @@
     return { maps, byName, owners, vanillaKeys, spawn: spawnRegions(sources, maps, owners, vanillaKeys, byName, p) };
   }
 
+  // Whether a building the game keeps holds a spawn point: true, false, or null when list-mods couldn't tell for a map
+  // on its cell. Build 41 takes all of a cell's buildings from the first map in Map= with the cell. Build 42 takes
+  // them from every map with the cell, but drops a map's building where a map earlier in Map= has the 300-square cell
+  // the building starts in (IsoMetaGrid.higherPriority300x300CellExists, MapFiles.hasCell300).
+  function inBuilding(x, y, z, key, maps) {
+    const id = `${x},${y},${z}`;
+    const on = maps.filter(m => m.keySet.has(key));
+    // The corners of a map's buildings that hold the point, or null when list-mods couldn't tell.
+    const corners = m => (!m.rooms ? null : m.rooms.has(id) ? m.rooms.get(id) : []);
+    if (model.b41) return corners(on[0]) && corners(on[0]).length > 0;
+    const has300 = (m, cx, cy) => {
+      const x256 = Math.floor(cx * 300 / 256);
+      const y256 = Math.floor(cy * 300 / 256);
+      return m.keySet.has(cellKey(x256, y256)) && m.keySet.has(cellKey(x256 + 1, y256 + 1));
+    };
+    let unknown = false;
+    for (const m of on) {
+      if (!corners(m)) {
+        unknown = true;
+        continue;
+      }
+      for (const [bx, by] of corners(m)) {
+        const [cx, cy] = [Math.trunc(bx / 300), Math.trunc(by / 300)];
+        if (!maps.slice(0, m.index).some(e => has300(e, cx, cy))) return true;
+      }
+    }
+    return unknown ? null : false;
+  }
+
   // The spawn regions the server offers after the image's start (apply_mod_maps), with their points: a map region's
   // spawnpoints.lua comes from the mod loaded last that has it, else from the game. Each point is checked against the
-  // maps on its cell: on top is the region's own map (the vanilla map for a region of its towns), another map, or none.
+  // maps on its cell: none ('nomap'), or no building the game keeps there ('outside'). Without the buildings, a point
+  // where a map other than the region's own (the vanilla map for a region of its towns) comes first is flagged instead
+  // ('covered').
   function spawnRegions(sources, maps, owners, vanillaKeys, byName, p) {
     const lines = model.server.spawnRegions;
     if (!lines) return null;
@@ -1354,27 +1394,31 @@
     }
     const size = cellSquares();
     const vanilla = byName.get(VANILLA_MAP);
+    const check = ([x, y, z], own) => {
+      const key = cellKey(Math.floor(x / size), Math.floor(y / size));
+      const here = [...owners.get(key) || [], ...(vanillaKeys.has(key) ? [vanilla] : [])];
+      const building = here.length ? inBuilding(x, y, z, key, maps) : null;
+      const problem = !here.length ? 'nomap' : building === false ? 'outside' : building === null && own && here[0] !== own ? 'covered' : null;
+      return { x, y, z, key, problem, level: problem === 'nomap' ? 'bad' : problem ? 'warn' : null, first: here[0] || null };
+    };
     const fixed = /^\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*$/.exec(model.server.spawnPoint || '');
-    const point = fixed && (Number(fixed[1]) || Number(fixed[2])) ? fixed.slice(1).map(Number) : null;
+    const point = fixed && (Number(fixed[1]) || Number(fixed[2])) ? check(fixed.slice(1).map(Number), null) : null;
+    if (point?.problem) p.spawns.push({ text: `SpawnPoint: ${point.problem === 'nomap' ? 'on a cell no map has' : 'outside any building'}`, go: () => goToMap(point.first ? point.first.name : VANILLA_MAP) });
     const checked = regions.map(r => {
       const mapName = /^media\/maps\/(.+)\/spawnpoints\.lua$/.exec(r.file || '')?.[1] ?? null;
       const source = mapName === null ? null : sources.find(s => s.folders.get(mapName)?.spawns);
       const own = mapName === null ? null : byName.get(mapName) ?? vanilla;
       const raw = r.file ? source?.folders.get(mapName).spawns || [] : r.points;
-      const points = raw.map(([x, y, z]) => {
-        const key = cellKey(Math.floor(x / size), Math.floor(y / size));
-        const here = [...owners.get(key) || [], ...(vanillaKeys.has(key) ? [vanilla] : [])];
-        const level = !here.length ? 'bad' : own && here[0] !== own ? 'warn' : null;
-        return { x, y, z, key, level, first: here[0] || null };
-      });
+      const points = raw.map(pt => check(pt, own));
       return { ...r, mapName, own, found: r.file ? Boolean(source) : true, from: source?.inst?.id ?? null, points };
     });
     const active = point ? [] : checked.filter(r => !r.commented);
     for (const r of active) {
-      const bad = r.points.filter(pt => pt.level === 'bad').length;
-      const covered = r.points.filter(pt => pt.level === 'warn');
+      const bad = r.points.filter(pt => pt.problem === 'nomap').length;
+      const outside = r.points.filter(pt => pt.problem === 'outside').length;
+      const covered = r.points.filter(pt => pt.problem === 'covered');
       const firsts = [...new Set(covered.map(pt => pt.first.name))];
-      const what = [bad ? `${plural(bad, 'point')} on cells no map has` : null,
+      const what = [bad ? `${plural(bad, 'point')} on cells no map has` : null, outside ? `${plural(outside, 'point')} outside any building` : null,
         covered.length ? `${plural(covered.length, 'point')} where ${firsts.join(', ')} ${firsts.length > 1 ? 'come' : 'comes'} first` : null].filter(Boolean);
       if (!what.length) continue;
       p.spawns.push({ text: `${r.name}: ${what.join(', ')}`, go: () => goToMap(r.own ? r.own.name : VANILLA_MAP) });
@@ -2127,19 +2171,23 @@
     $('spawn-points').parentNode.hidden = !spawn;
     if (!spawn) return;
     const rows = [];
-    if (spawn.point) rows.push(h('li', { class: 'warn', text: `SpawnPoint is ${spawn.point.join(',')} in the server's settings, so every new character starts there and the regions below are left out.` }));
+    if (spawn.point) {
+      const { x, y, z, problem } = spawn.point;
+      const where = { nomap: ' No map in Map= has its cell.', outside: ' It is outside any building.' }[problem] || '';
+      rows.push(h('li', { class: problem === 'nomap' ? 'bad' : 'warn', text: `SpawnPoint is ${x},${y},${z} in the server's settings, so every new character starts there and the regions below are left out.${where}` }));
+    }
     for (const r of spawn.regions) {
       const source = r.serverfile ? `from ${r.serverfile} in the server's folder` : r.from ? `from ${r.from}` : r.found ? "from the game's files" : null;
       if (r.commented) {
         rows.push(h('li', { class: 'muted', text: `${r.name}: commented out.` }));
         continue;
       }
-      const bad = r.points.filter(pt => pt.level === 'bad').length;
-      const covered = r.points.filter(pt => pt.level === 'warn').length;
+      const count = problem => r.points.filter(pt => pt.problem === problem).length;
+      const [bad, outside, covered] = [count('nomap'), count('outside'), count('covered')];
       const parts = [!r.found ? "its spawnpoints.lua is in no mod that loads" : plural(r.points.length, 'point'),
-        source, r.added ? 'added on the next start' : null,
+        source, r.added ? 'added on the next start' : null, outside ? `${outside} outside any building` : null,
         covered ? `${covered} where another map comes first` : null, bad ? `${bad} on cells no map has` : null].filter(Boolean);
-      const level = spawn.point ? 'muted' : bad ? 'bad' : covered ? 'warn' : null;
+      const level = spawn.point ? 'muted' : bad ? 'bad' : outside || covered ? 'warn' : null;
       const name = r.mapName && derived.mapCheck.byName.has(r.mapName) ? r.mapName : null;
       rows.push(h('li', { class: level },
         name ? h('button', { type: 'button', class: 'link', text: r.name, 'aria-pressed': String(mapFocus === name), onclick: () => focusMap(name) }) : r.name,
@@ -2274,10 +2322,11 @@
     ].map(([kind, label]) => h('span', {}, h('span', { class: 'swatch', style: `background: var(--cell-${kind})` }), `${label} ${counts[kind]}`));
     if (others.length) legend.push(h('span', {}, h('span', { class: 'swatch other' }), `Maps of mods that don't load ${others.reduce((n, o) => n + o.keys.length, 0)}`));
     if (points.length) {
-      const level = l => points.filter(pt => pt.level === l).length;
-      legend.push(h('span', {}, h('span', { class: 'swatch spawn' }), `Spawn points ${level(null)}`));
-      if (level('warn')) legend.push(h('span', {}, h('span', { class: 'swatch spawn warn' }), `where another map comes first ${level('warn')}`));
-      if (level('bad')) legend.push(h('span', {}, h('span', { class: 'swatch spawn bad' }), `on no map ${level('bad')}`));
+      const count = problem => points.filter(pt => pt.problem === problem).length;
+      legend.push(h('span', {}, h('span', { class: 'swatch spawn' }), `Spawn points ${count(null)}`));
+      for (const [problem, kind, label] of [['outside', 'warn', 'outside a building'], ['covered', 'warn', 'where another map comes first'], ['nomap', 'bad', 'on no map']]) {
+        if (count(problem)) legend.push(h('span', {}, h('span', { class: `swatch spawn ${kind}` }), `${label} ${count(problem)}`));
+      }
     }
     $('grid-legend').replaceChildren(...legend);
     canvas.setAttribute('aria-label', `Cells of the maps in Map=: ${counts.vanilla} with only the vanilla map, ${counts.mod} with one mod map, ${counts.over} with a mod map over the vanilla map, ${counts.shared} with maps of different items. The list below says the same for each map.`);

@@ -157,6 +157,20 @@ spawns="$(jq -c '(.game.mapFolders | map({key: .name, value: (.spawns // [] | le
     | {name, points: $points[.file | capture("^media/maps/(?<map>.+)/spawnpoints\\.lua$").map]}]' <<< "${mods_json}")"
 jq -e 'length > 0 and all(.points > 0)' <<< "${spawns}" > /dev/null || fail "list-mods found no spawn points for a spawn region: ${spawns}"
 echo "::notice title=Spawn points::${label}: $(jq -r 'map("\(.name) \(.points)") | join(", ")' <<< "${spawns}")"
+# The points list-mods finds in no building of the vanilla map, its only map here, are the ones the server
+# warned about while it started.
+buildings="$(jq -c '(.game.mapFolders | map({key: .name, value: .}) | from_entries) as $folders
+  | ($folders["Muldraugh, KY"].rooms // []) as $held
+  | if any($held[]; length != 5) then error("list-mods could not read cell headers of the vanilla map, as it warned above") else . end
+  | [.server.spawnRegions[] | select(.commented | not)
+    | if .file then $folders[.file | capture("^media/maps/(?<map>.+)/spawnpoints\\.lua$").map].spawns // [] else .points // [] end | .[]]
+  | unique | {points: length, outside: map(select(. as $point | any($held[]; .[0:3] == $point) | not) | map(tostring) | join(","))}' \
+  <<< "${mods_json}")" || fail "list-mods could not tell which spawn points are in a building"
+outside="$(jq -r '.outside[]' <<< "${buildings}")"
+warned="$(docker logs "${name}" 2>&1 | grep -oE 'initSpawnBuildings: no room or building at -?[0-9]+,-?[0-9]+,-?[0-9]+' | sed 's/.* at //' | sort -u || true)"
+[ "$(sort -u <<< "${outside}")" = "${warned}" ] \
+  || fail "list-mods finds these spawn points in no building: ${outside:-none}; the server warned about these: ${warned:-none}"
+echo "::notice title=Spawn buildings::${label}: $(jq '.outside | length' <<< "${buildings}") of $(jq .points <<< "${buildings}") spawn points in no building, as the server says"
 
 stop_server 1
 

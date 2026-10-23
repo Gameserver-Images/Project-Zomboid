@@ -239,6 +239,25 @@ fi
 } | spawn_points > "${tmp}/spawns"
 server_spawn_point=""
 [ -f "${ini_file}" ] && server_spawn_point="$(ini_value "${ini_file}" SpawnPoint)"
+# The buildings of each map folder that hold the spawn points and SpawnPoint, so the mods page can tell
+# which points are in one for any order of Map=: per folder [x, y, z, building x, building y], or [x, y, z]
+# for a point on a cell header that can't be read.
+spawn_point_pattern='^[[:space:]]*(-?[0-9]+)[[:space:]]*,[[:space:]]*(-?[0-9]+)[[:space:]]*,[[:space:]]*(-?[0-9]+)[[:space:]]*$'
+{
+  cut -f 2- "${tmp}/spawns"
+  if [[ "${server_spawn_point}" =~ ${spawn_point_pattern} ]]; then
+    printf '%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  fi
+} | LC_ALL=C sort -u > "${tmp}/points"
+: > "${tmp}/rooms"
+if [ -s "${tmp}/points" ] && [ "${#map_dirs[@]}" -gt 0 ]; then
+  if ! spawn_rooms "$([ "${version%%.*}" -lt 42 ] && echo 300 || echo 256)" "${map_dirs[@]}" < "${tmp}/points" > "${tmp}/rooms"; then
+    echo "Error: could not read the rooms of the map files" >&2
+    exit 1
+  fi
+fi
+awk -F '\t' '$1 == "!" { print "Warning: " $2 "/" $3 " could not be read (" $4 "), so the mods page does not check the spawn points on its cell" }' \
+  "${tmp}/rooms" >&2
 
 bash "${SCRIPT_DIR}/list_env.sh" --tsv | awk -F '\t' '$1 == "ini" || $1 == "sandbox"' > "${tmp}/settings"
 
@@ -261,6 +280,7 @@ jq -n -c \
   --rawfile zone_stops "${tmp}/zone_stops" \
   --rawfile regions "${tmp}/regions" \
   --rawfile spawns "${tmp}/spawns" \
+  --rawfile rooms "${tmp}/rooms" \
   --arg spawn_dir "${spawn_file%/*}" \
   --arg spawn_point "${server_spawn_point}" '
   def lines: split("\n") | map(select(length > 0));
@@ -302,9 +322,11 @@ jq -n -c \
       | map({key: (.[0][1] + "\t" + .[0][2]), value: (map({key: .[3], value: $stops[.[4]]}) | from_entries)}) | from_entries) as $zones
   | ($spawns | rows | group_by(.[0]) | map({key: .[0][0], value: map(.[1:] | map(tonumber))}) | from_entries) as $points
   | ($map_files | map(select(.[0] == "spawn") | {key: (.[1] + "\t" + .[2]), value: ($points[.[4]] // [])}) | from_entries) as $map_spawns
+  | ($rooms | rows | map(select(.[0] != "!") | if .[0] == "?" then .[1:] else . end) | group_by(.[0])
+      | map({key: .[0][0], value: map(.[1:] | map(tonumber))}) | from_entries) as $held
   | ($map_files | map(select(.[0] == "folder")) | group_by(.[1])
       | map({key: .[0][1], value: (map({name: .[2], cells: ($cells[.[3]] // []), zones: ($zones[.[1] + "\t" + .[2]] // {}),
-          spawns: $map_spawns[.[1] + "\t" + .[2]]}) | sort_by(.name))})
+          spawns: $map_spawns[.[1] + "\t" + .[2]], rooms: ($held[.[3]] // [])}) | sort_by(.name))})
       | from_entries) as $folders
   | ($map_files | map(select(.[0] == "loader") | {key: .[1], value: (.[2] == "true")}) | from_entries) as $loaders
 
