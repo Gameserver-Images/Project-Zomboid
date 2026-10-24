@@ -114,6 +114,68 @@ fi
 
 mod_info_rows "${version}" "${content_dir}"/*/mods > "${tmp}/mods"
 
+# The items WORKSHOP_IDS and WorkshopItems name that aren't downloaded yet, which the next start downloads: of those
+# the Zomboid Map Index at MAP_INDEX_URL has, the mods as the game reads their mod.info, and their maps as the index
+# read them from the workshop update it has, so the mods page can check them before that start.
+echo '[]' > "${tmp}/indexed.json"
+mapfile -t pending < <({
+  jq -r 'if .children == null then .id else .children[] | select(.collection | not) | .id end' "${tmp}/tree"
+  printf '%s\n' "${server_items}"
+} | grep -E '^[0-9]+$' | sort -u | grep -vxF -f "${tmp}/downloaded")
+if [ "${#pending[@]}" -gt 0 ] && [ -n "${MAP_INDEX_URL:-}" ]; then
+  if curl -fsS --max-time 30 "${MAP_INDEX_URL}" > "${tmp}/index.json" 2> /dev/null \
+    && jq -e '.items | type == "array"' "${tmp}/index.json" > /dev/null 2>&1; then
+    # Only entries whose folder names a mods folder can have, so their mod.info files stay in the temporary folder.
+    printf '%s\n' "${pending[@]}" | jq -R . | jq -s -c --slurpfile index "${tmp}/index.json" '
+      def name: type == "string" and test("^[^/\\\\\u0000-\u001f]+$") and . != "." and . != "..";
+      . as $pending
+      | [$index[0].items[] | select(type == "object" and (.id | type == "string") and (.id as $id | any($pending[]; . == $id))
+          and (.format | type == "number") and .format >= 2 and (.mods | type == "array")
+          and all(.mods[]; type == "object" and (.folder | name) and (.roots | type == "array")
+            and all(.roots[]; type == "object" and (.path == "" or (.path | name)))))]' > "${tmp}/indexed.json"
+  else
+    echo "Warning: could not read the Zomboid Map Index at ${MAP_INDEX_URL}, so the mods page doesn't see the mods and maps of the items not downloaded yet" >&2
+  fi
+fi
+jq -c '.[] | .id as $id | .mods[] | .folder as $folder | .roots[] | {id: $id, folder: $folder, path, modInfo}' "${tmp}/indexed.json" \
+  | while IFS= read -r root; do
+    dir="${tmp}/index/$(jq -r '.id + "/mods/" + .folder + (if .path == "" then "" else "/" + .path end)' <<< "${root}")"
+    mkdir -p "${dir}"
+    if jq -e '.modInfo | type == "array"' <<< "${root}" > /dev/null; then
+      jq -r '.modInfo[] | tostring' <<< "${root}" > "${dir}/mod.info"
+    fi
+  done
+mod_info_rows "${version}" "${tmp}/index"/*/mods > "${tmp}/index_mods"
+# Their map files as list-mods reads a mod's: of its folders (the version folder, then common/), the first with a map
+# folder gives the map's cells, the first with a zone file that file's line where the zones stop, the first with
+# spawnpoints.lua the spawn points, with the buildings the index found holding them when that folder is the one with
+# the cells, the first with map.info and with each translation the titles, and the first with a zone loader that one.
+jq -n -c --rawfile rows "${tmp}/index_mods" --slurpfile indexed "${tmp}/indexed.json" --arg vanilla "${VANILLA_MAP}" '
+  def first_of(f): [f] | if length > 0 then .[0] else null end;
+  ($indexed[0] | map({key: .id, value: .}) | from_entries) as $by_id
+  | [$rows | split("\n")[] | select(length > 0) | split("\t") | .[0] as $item | .[1] as $folder | .[2] as $files
+      | first_of($by_id[$item].mods[] | select(.folder == $folder) | .roots) as $roots
+      | (if $files == "" then [] elif $files == "." then [""] elif $files == "common" then ["common"] else [$files, "common"] end) as $order
+      | [$order[] as $path | ($roots // [])[] | select(.path == $path)] as $chosen
+      | {key: ($item + "/" + $folder), value: {
+          maps: ([$chosen[].maps[]?.name | select(. != $vanilla)] | unique),
+          mapFolders: ([$chosen[].maps[]?.name] | unique | map(. as $name
+            | [$chosen[] | .path as $path | .maps[]? | select(.name == $name) | . + {root: $path}] as $all
+            | first_of($all[] | select(.spawns != null)) as $spawned
+            | {name: $name, cells: ($all[0].cells // []),
+               zones: (reduce ("objects.lua", "regions.lua", "roomtones.lua") as $file ({};
+                 first_of($all[] | select((.zones // {}) | has($file))) as $map | if $map then . + {($file): $map.zones[$file]} else . end)),
+               spawns: (if $spawned then $spawned.spawns else null end),
+               rooms: (if $spawned == null then [] elif $spawned.root == $all[0].root then ($all[0].rooms // []) else [$spawned.spawns[] | .[0:3]] end)})),
+          zoneLoader: first_of($chosen[] | select(.zoneLoader != null) | .zoneLoader),
+          mapTitles: ([$chosen[].maps[]?.name, $chosen[].translations[]?.name] | unique | map(. as $name
+            | first_of($chosen[].maps[]? | select(.name == $name and .mapInfo != null)) as $info
+            | {name: $name, mapInfo: ($info != null), title: (if $info then $info.title else null end),
+               json: first_of($chosen[].translations[]? | select(.name == $name and .json != null) | .json),
+               txt: first_of($chosen[].translations[]? | select(.name == $name and .txt != null) | .txt)})
+            | map(select(.mapInfo or .json != null or .txt != null)))}}]
+  | from_entries' > "${tmp}/index_maps.json"
+
 awk -F '\t' '$4 == 1 && $19 == ""' "${tmp}/mods" > "${tmp}/standalone"
 {
   # The English sandbox translations of the mods that load by themselves
@@ -304,6 +366,7 @@ server_spawn_point=""
 spawn_point_pattern='^[[:space:]]*(-?[0-9]+)[[:space:]]*,[[:space:]]*(-?[0-9]+)[[:space:]]*,[[:space:]]*(-?[0-9]+)[[:space:]]*$'
 {
   cut -f 2- "${tmp}/spawns"
+  jq -r '.[].mapFolders[].spawns[]? | map(tostring) | join("\t")' "${tmp}/index_maps.json"
   if [[ "${server_spawn_point}" =~ ${spawn_point_pattern} ]]; then
     printf '%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
   fi
@@ -332,6 +395,10 @@ jq -n -c \
   --slurpfile required "${tmp}/required" \
   --rawfile downloaded "${tmp}/downloaded" \
   --rawfile mods "${tmp}/mods" \
+  --rawfile index_mods "${tmp}/index_mods" \
+  --slurpfile index_maps "${tmp}/index_maps.json" \
+  --slurpfile indexed "${tmp}/indexed.json" \
+  --rawfile point_rows "${tmp}/points" \
   --rawfile files "${tmp}/files" \
   --rawfile settings "${tmp}/settings" \
   --rawfile map_files "${tmp}/map_files" \
@@ -417,17 +484,38 @@ jq -n -c \
   def map_files($key): {mapFolders: ($folders[$key] // []), zoneLoader: (if $loaders | has($key) then $loaders[$key] else null end),
     mapTitles: ($map_titles[$key] // [])};
 
-  # error: why the game does not find the mod. requireEntries: the require entries as the game loads
-  # them, untrimmed and with empty ones.
-  ($mods | rows | map((.[0] + "/" + .[1]) as $key | [.[0], {
+  (($version | split(".")[0] | tonumber? // 0) >= 42) as $b42
+  | (if $b42 then 256 else 300 end) as $squares
+  | ($point_rows | rows | map(map(tonumber))) as $all_points
+  # The buildings of an indexed map are known for its own spawn points only, so the other points on the cells its
+  # buildings can reach are unknown: its own cells and, on Build 42, the cells east, south and south-east of them,
+  # where buildings reach into (see rooms/ReadSpawnRooms.java).
+  | def index_rooms($folder):
+      ([$folder.cells[] | .[0] as $y | range(.[1]; .[2] + 1) | [., $y]]
+        | . + (if $b42 then map([.[0] + 1, .[1]], [.[0], .[1] + 1], [.[0] + 1, .[1] + 1]) else [] end)
+        | map({key: "\(.[0]),\(.[1])", value: true}) | from_entries) as $reach
+      | ([$folder.spawns[]? | map(tostring) | join(",")] | map({key: ., value: true}) | from_entries) as $own
+      | $folder.rooms + [$all_points[] | select(($own[map(tostring) | join(",")] | not)
+          and $reach["\((.[0] / $squares) | floor),\((.[1] / $squares) | floor)"])];
+    def index_map_files($key):
+      ($index_maps[0][$key] // {mapFolders: [], zoneLoader: null, mapTitles: []}) as $index
+      | {mapFolders: [$index.mapFolders[] | .rooms = index_rooms(.)], zoneLoader: $index.zoneLoader, mapTitles: $index.mapTitles};
+    # error: why the game does not find the mod. requireEntries: the require entries as the game loads
+    # them, untrimmed and with empty ones.
+    def mod_fields: {
       id: (.[4] | text), folder: .[1], versionFolder: (if .[2] == "" then null elif .[2] == "." then "" else .[2] end),
       name: (.[5] | text), description: (.[6] | text), author: (.[7] | text), modVersion: (.[8] | text),
       url: (.[9] | text), category: (.[10] | text), versionMin: (.[11] | text), versionMax: (.[12] | text),
       error: (if .[3] == "-" then .[18] | text else null end),
       require: (.[13] | ids), requireEntries: [.[19] // "" | scan("([^,]*),") | .[0]],
-      loadModAfter: (.[14] | ids), loadModBefore: (.[15] | ids), incompatible: (.[16] | ids),
-      maps: ($maps[$key] // []), sandbox: [($options[$key] // [])[] | sandbox($labels[$key] // {})]} + map_files($key)])
+      loadModAfter: (.[14] | ids), loadModBefore: (.[15] | ids), incompatible: (.[16] | ids)};
+  # The mods of the indexed items have no sandbox options: the index does not read them.
+  ([$mods | rows[] | (.[0] + "/" + .[1]) as $key | [.[0], mod_fields
+      + {maps: ($maps[$key] // []), sandbox: [($options[$key] // [])[] | sandbox($labels[$key] // {})]} + map_files($key)]]
+    + [$index_mods | rows[] | (.[0] + "/" + .[1]) as $key | [.[0], mod_fields
+      + {maps: ($index_maps[0][$key].maps // []), sandbox: []} + index_map_files($key)]]
     | group_by(.[0]) | map({key: .[0][0], value: (map(.[1]) | sort_by(.folder))}) | from_entries) as $item_mods
+  | ($indexed[0] | map({key: .id, value: .timeUpdated}) | from_entries) as $indexed_at
 
   | [
         [$tree[] | if .children == null then .id else .children[] | select(.collection | not) | .id end]
@@ -437,7 +525,7 @@ jq -n -c \
            title: $i.title, description: $i.description, tags: (if $i then [$i.tags[]?.tag] else null end),
            updated: ($i.time_updated | number), size: ($i.file_size | number),
            requiredItems: (if $keyed then [$required[$id].children[]?.publishedfileid] else null end),
-           downloaded: ($downloaded[$id] != null), mods: ($item_mods[$id] // [])}
+           downloaded: ($downloaded[$id] != null), indexed: ($indexed_at[$id] // null), mods: ($item_mods[$id] // [])}
     ] as $items
   # The words of the workshop pages of the items, for the server settings they name.
   | ([$items[].description // empty | ascii_downcase | scan("[a-z0-9_]+")] | unique | map({key: ., value: true}) | from_entries) as $words

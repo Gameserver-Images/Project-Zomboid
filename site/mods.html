@@ -388,6 +388,7 @@
   const INFO_KINDS = [
     ['pending', 'Mods from items not downloaded yet', "These items' descriptions name the mod IDs. The container downloads the items on its next start. Run list-mods again after that to check the mods."],
     ['notDownloaded', 'Items not downloaded yet', 'The container downloads them on its next start. Run list-mods again after that to see their mods.'],
+    ['indexed', 'Items not downloaded yet, from the Zomboid Map Index', 'The container downloads them on its next start. Until then their mods and maps are as the Zomboid Map Index read them from the workshop update it has, and their sandbox options are unknown. Run list-mods again after that start to check them as they are.'],
     ['empty', 'Downloaded items without mods', 'The game finds no mod.info in them, so they add nothing.'],
     ['settingInfo', 'Items that mention server settings', "Their workshop pages mention server settings, but these are already set as asked, the page can't check them, or the items' mods don't load. Server settings shows the lines."],
   ];
@@ -483,6 +484,9 @@
   }
 
   const formatDate = t => (typeof t === 'number' ? new Date(t * 1000).toISOString().slice(0, 10) : null);
+  // Which workshop update the Zomboid Map Index read an item from, and whether the workshop has a newer one.
+  const indexedNewer = item => item.updated !== null && item.updated > item.indexed;
+  const indexedText = item => `the index has its update of ${formatDate(item.indexed)}${indexedNewer(item) ? `, the workshop a newer one of ${formatDate(item.updated)}` : ''}`;
 
   // The lines of a BBCode description as plain text.
   function plainLines(description) {
@@ -661,7 +665,8 @@
         id: raw.id, available: raw.available === true, title: text(raw.title), description: text(raw.description),
         updated: typeof raw.updated === 'number' ? raw.updated : null, size: typeof raw.size === 'number' ? raw.size : null,
         requiredItems: Array.isArray(raw.requiredItems) ? texts(raw.requiredItems) : [],
-        downloaded: raw.downloaded === true, mods: [], declared: [], hints: null, asks: null,
+        downloaded: raw.downloaded === true, indexed: typeof raw.indexed === 'number' ? raw.indexed : null,
+        mods: [], declared: [], hints: null, asks: null,
       };
       m.items.set(item.id, item);
       for (const rawMod of list(raw.mods)) {
@@ -696,7 +701,7 @@
         for (const name of mod.maps) m.modMaps.add(name);
         for (const o of mod.sandbox) if (!m.options.has(o.env)) m.options.set(o.env, o);
       }
-      if (!item.downloaded) item.declared = declaredModIds(item.description);
+      if (!item.downloaded && item.indexed === null) item.declared = declaredModIds(item.description);
       item.search = [item.id, item.title || '', ...item.declared, ...item.mods.flatMap(inst => [inst.id, inst.mod.name || ''])].join('\n').toLowerCase();
     }
     // The items not downloaded yet whose description names a mod ID.
@@ -1210,6 +1215,7 @@
       const item = model.items.get(id);
       const go = () => goToItem(id);
       if (!item.available) p.unavailable.push({ text: itemTitle(item), go });
+      else if (item.indexed !== null) p.indexed.push({ text: `${itemTitle(item)}: ${indexedText(item)}`, go });
       else if (!item.downloaded) p.notDownloaded.push({ text: itemTitle(item), go });
       else if (!item.mods.length) p.empty.push({ text: itemTitle(item), go });
       else if (item.mods.every(inst => inst.loadProblem)) p.dead.push({ text: itemTitle(item), go });
@@ -1288,6 +1294,10 @@
       }
       const folder = source?.folders.get(entry.name);
       const notes = [];
+      if (source?.inst?.item.indexed != null) {
+        const item = source.inst.item;
+        notes.push({ level: indexedNewer(item) ? 'warn' : 'muted', text: `From the Zomboid Map Index, as ${itemTitle(item)} isn't downloaded yet: ${indexedText(item)}.` });
+      }
       if (candidates.length > 1) {
         const best = candidates.slice(1).reduce((a, b) => (cellCount(b.folders.get(entry.name)) > cellCount(a.folders.get(entry.name)) ? b : a));
         const [have, could] = [cellCount(folder), cellCount(best.folders.get(entry.name))];
@@ -1860,6 +1870,9 @@
     const badges = [];
     if (!item.available) badges.push(badge('bad', 'unavailable', 'Hidden, private or removed from the workshop'));
     if (!item.downloaded && item.available) badges.push(badge('warn', 'not downloaded', 'The container downloads it on its next start'));
+    if (item.indexed !== null) {
+      badges.push(badge(indexedNewer(item) ? 'warn' : '', 'from the map index', `Its mods and maps come from the Zomboid Map Index until it is downloaded: ${indexedText(item)}`));
+    }
     const failing = item.mods.filter(inst => inst.loadProblem).length;
     if (failing) {
       badges.push(badge('warn', failing === item.mods.length ? `doesn't load on ${model.gameVersion}` : `${failing} of ${item.mods.length} mods don't load on ${model.gameVersion}`));

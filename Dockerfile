@@ -60,6 +60,8 @@ COPY --from=rooms /src/read_spawn_rooms.jar /usr/local/lib/read_spawn_rooms.jar
 ARG MODS_PAGE=""
 ARG IMAGE_SOURCE=""
 ENV MODS_PAGE="${MODS_PAGE}" IMAGE_SOURCE="${IMAGE_SOURCE}"
+# Where list-mods finds the mods and maps of the workshop items not downloaded yet.
+ENV MAP_INDEX_URL=https://zexyqag.github.io/Zomboid-Map-Index/index.json
 # image-env lists the variables the image sets itself, so startup can warn about unknown ones.
 RUN ln -s /server/scripts/list_env.sh /usr/local/bin/list-env \
   && ln -s /server/scripts/list_mods.sh /usr/local/bin/list-mods \

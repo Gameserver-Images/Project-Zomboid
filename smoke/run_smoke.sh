@@ -800,7 +800,8 @@ fake_steam() {
   # A fake Steam API on PATH that logs "<API> <ID count>" per call. 900 is a collection holding item
   # 101, collection 910 (item 103 and the empty collection 920) and item 102. Item 104 is hidden, and
   # Steam fails to answer for item 107 (result 2).
-  # With the key "secret", item 101 requires item 102.
+  # With the key "secret", item 101 requires item 102. It serves FAKE_INDEX as any index.json, as the
+  # Zomboid Map Index, and fails for it with FAKE_INDEX_DOWN.
   mkdir -p "${WORK}/bin"
   cat > "${WORK}/bin/curl" <<'CURL'
 #!/bin/bash
@@ -817,6 +818,11 @@ done
 url="${url%/v1/}"
 printf '%s %s\n' "${url##*/}" "${#ids[@]}" >> "${HOMEDIR}/steam-calls"
 [ -n "${FAKE_STEAM_DOWN:-}" ] && exit 6
+if [[ "${url}" == */index.json ]]; then
+  [ -z "${FAKE_INDEX_DOWN:-}" ] || exit 22
+  cat "${FAKE_INDEX}"
+  exit 0
+fi
 # Like Steam, refuse a request without publishedfileids[0..n-1] or, but for GetDetails, without a count of n.
 for ((i = 0; i < ${#ids[@]}; i++)); do
   [ -n "${index[$i]:-}" ] || exit 22
@@ -1181,6 +1187,94 @@ esac
 exit 0
 CURL
   chmod +x "${WORK}/paste-bin/curl"
+}
+
+# The items not downloaded yet, from the Zomboid Map Index: 101 is downloaded and in the index too, 900 brings 102
+# (in an older index format) and 103 (via 910), and WorkshopItems 105, whose folder name would leave the mods folder.
+# 103 has Town, read from 42/ (42.22 is newer than the game) and common/, and Gone, a Build 41 mod.
+test_list_mods_index() {
+  TEST='list-mods index'
+  new_env
+  fake_steam
+  local out="${WORK}/mods.json"
+  export FAKE_GAME_VERSION=42.21.0 MAP_INDEX_URL=https://index.example/index.json FAKE_INDEX="${WORK}/index.json"
+  printf '%s\n' 'name=Here' 'id=HereMod' | mod_file "101/mods/Here/42/mod.info"
+  # Here's own map has a hall that holds a spawn point of the indexed Town.
+  mkdir -p "${STEAMAPPDIR}/steamapps/workshop/content/108600/101/mods/Here/42/media/maps/Here Map"
+  lotheader "${STEAMAPPDIR}/steamapps/workshop/content/108600/101/mods/Here/42/media/maps/Here Map/10_5.lotheader" 42 'room hall 0 0 40 10 2 2' 'building 0'
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems '101;105'
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '2700,1300,0'
+  cat > "${FAKE_INDEX}" <<'JSON'
+{"items": [
+  {"format": 2, "id": "101", "title": "Here", "timeUpdated": 5, "mods": [{"folder": "Here", "roots": [
+    {"path": "42", "modInfo": ["name=Not this", "id=IndexedHere"], "zoneLoader": null, "maps": [], "translations": []}]}]},
+  {"format": 1, "id": "102", "title": "Older", "timeUpdated": 5, "mods": []},
+  {"format": 2, "id": "103", "title": "Town Pack", "timeUpdated": 1690000000, "mods": [
+    {"folder": "Town", "roots": [
+      {"path": "42", "modInfo": ["name=Town", "id=TownMod", "require=\\TilePack,\\Other"], "zoneLoader": null,
+       "maps": [{"name": "Town", "cells": [[5, 10, 11]], "spawns": [[2600, 1290, 0], [2900, 1290, 1]], "rooms": [[2600, 1290, 0, 2590, 1280]],
+                 "zones": {"objects.lua": 4}, "mapInfo": ["title=Town KY"], "title": "Town KY"},
+                {"name": "Muldraugh, KY", "cells": [], "spawns": null, "rooms": [], "zones": {}, "mapInfo": null, "title": null}],
+       "translations": []},
+      {"path": "42.22", "modInfo": ["name=Too new", "id=TownMod"], "zoneLoader": null, "maps": [], "translations": []},
+      {"path": "common", "modInfo": null, "zoneLoader": true,
+       "maps": [{"name": "Town", "cells": [[9, 9, 9]], "spawns": [[1, 1, 0]], "rooms": [], "zones": {"objects.lua": null, "regions.lua": null},
+                 "mapInfo": ["title=Common"], "title": "Common"},
+                {"name": "Extra", "cells": [[20, 1, 1]], "spawns": [[300, 5200, 0]], "rooms": [], "zones": {}, "mapInfo": null, "title": null}],
+       "translations": [{"name": "Town", "json": "Town JSON", "txt": null}]}]},
+    {"folder": "Gone", "roots": [{"path": "", "modInfo": ["name=Build 41", "id=GoneMod"], "zoneLoader": null,
+      "maps": [{"name": "Old", "cells": [[1, 1, 1]], "spawns": [[450, 450, 0]], "rooms": [], "zones": {}, "mapInfo": null, "title": null}],
+      "translations": []}]}]},
+  {"format": 2, "id": "105", "title": "Escape", "timeUpdated": 5, "mods": [{"folder": "..", "roots": [{"path": "", "modInfo": ["id=Escape"]}]}]}
+]}
+JSON
+  list_mods() {
+    rm -f "${HOMEDIR}/steam-calls"
+    PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=900 bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err"
+  }
+  list_mods || { fail "list-mods failed: $(cat "${WORK}/err")"; return; }
+  expect_eq "$(jq -c '[.items[] | [.id, .downloaded, .indexed, [.mods[].id]]]' "${out}")" \
+    '[["101",true,null,["HereMod"]],["102",false,null,[]],["103",false,1690000000,["GoneMod","TownMod"]],["105",false,null,[]]]'
+  expect_eq "$(jq -S -c '.items[2].mods[1] | {id, versionFolder, name, description, require, requireEntries, error, maps, sandbox, mapFolders, zoneLoader, mapTitles}' "${out}")" \
+    '{"description":null,"error":null,"id":"TownMod","mapFolders":[{"cells":[[20,1,1]],"name":"Extra","rooms":[],"spawns":[[300,5200,0]],"zones":{}},{"cells":[],"name":"Muldraugh, KY","rooms":[],"spawns":null,"zones":{}},{"cells":[[5,10,11]],"name":"Town","rooms":[[2600,1290,0,2590,1280],[2700,1300,0]],"spawns":[[2600,1290,0],[2900,1290,1]],"zones":{"objects.lua":4,"regions.lua":null}}],"mapTitles":[{"json":"Town JSON","mapInfo":true,"name":"Town","title":"Town KY","txt":null}],"maps":["Extra","Town"],"name":"Town","require":["TilePack","Other"],"requireEntries":["TilePack","Other"],"sandbox":[],"versionFolder":"42","zoneLoader":true}'
+  expect_eq "$(jq -S -c '.items[2].mods[0] | {id, versionFolder, error, maps, mapFolders, zoneLoader, mapTitles}' "${out}")" \
+    '{"error":"no mod.info for this game version","id":"GoneMod","mapFolders":[],"mapTitles":[],"maps":[],"versionFolder":null,"zoneLoader":null}'
+  expect_eq "$(jq -c '.items[0].mods[0].mapFolders | map([.name, .rooms])' "${out}")" '[["Here Map",[[2600,1290,0,2600,1290]]]]'
+  grep -q 'Zomboid Map Index' "${WORK}/err" && fail "list-mods warned about the index: $(cat "${WORK}/err")"
+  expect_eq "$(grep -c '^index.json ' "${HOMEDIR}/steam-calls")" 1
+  # On Build 42, buildings reach into the cell east of their own.
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '3100,1300,0'
+  list_mods || fail "list-mods failed with a point east of the map: $(cat "${WORK}/err")"
+  expect_eq "$(jq -c '.items[2].mods[1].mapFolders[2].rooms' "${out}")" '[[2600,1290,0,2590,1280],[3100,1300,0]]'
+  # On Build 41 the mod folder itself is read, with cells of 300 squares (square 550 is on cell 1), and buildings
+  # don't reach over.
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '550,400,0'
+  FAKE_GAME_VERSION=41.78.16 list_mods || fail "list-mods failed on Build 41: $(cat "${WORK}/err")"
+  expect_eq "$(jq -c '.items[2].mods[] | [.id, .versionFolder, .error, .maps, [.mapFolders[] | [.name, .rooms]]]' "${out}")" \
+    "$(printf '%s\n' '["GoneMod","",null,["Old"],[["Old",[[550,400,0]]]]]' '["TownMod",null,"no mod.info for this game version",[],[]]')"
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '650,400,0'
+  FAKE_GAME_VERSION=41.78.16 list_mods || fail "list-mods failed on Build 41 with a point east of the map: $(cat "${WORK}/err")"
+  expect_eq "$(jq -c '.items[2].mods[0].mapFolders[0].rooms' "${out}")" '[]'
+  # Without the index, the items not downloaded yet have no mods.
+  for broken in down '{"items": {}}' 'not json'; do
+    if [ "${broken}" = down ]; then
+      FAKE_INDEX_DOWN=1 list_mods || fail "list-mods failed without the index: $(cat "${WORK}/err")"
+    else
+      printf '%s\n' "${broken}" > "${WORK}/broken.json"
+      FAKE_INDEX="${WORK}/broken.json" list_mods || fail "list-mods failed with the index ${broken}: $(cat "${WORK}/err")"
+    fi
+    expect_eq "$(cat "${WORK}/err")" "Warning: could not read the Zomboid Map Index at https://index.example/index.json, so the mods page doesn't see the mods and maps of the items not downloaded yet"
+    expect_eq "$(jq -c '[.items[] | [.id, .indexed, (.mods | length)]]' "${out}")" '[["101",null,1],["102",null,0],["103",null,0],["105",null,0]]'
+  done
+  # Turned off, or with nothing to look up, it asks nothing.
+  MAP_INDEX_URL='' list_mods || fail "list-mods failed with the index off: $(cat "${WORK}/err")"
+  grep -q '^index.json ' "${HOMEDIR}/steam-calls" && fail "list-mods read the index while it was off"
+  expect_eq "$(jq -c '.items[2].indexed' "${out}")" 'null'
+  set_ini_value "${SERVER}/pzserver.ini" WorkshopItems '101'
+  rm -f "${HOMEDIR}/steam-calls"
+  PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS='' bash "${SCRIPT_DIR}/list_mods.sh" > "${out}" 2> "${WORK}/err" || fail "list-mods failed with every item downloaded"
+  grep -q '^index.json ' "${HOMEDIR}/steam-calls" && fail "list-mods read the index with every item downloaded"
+  unset FAKE_GAME_VERSION MAP_INDEX_URL FAKE_INDEX
 }
 
 test_list_mods_upload() {
@@ -2621,7 +2715,7 @@ EOF
   expect_eq "$?" 0
 }
 
-for t in test_ini test_sandbox test_sandbox_mods test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_spawn_rooms test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
+for t in test_ini test_sandbox test_sandbox_mods test_preset test_maps test_map_checks test_mod_folders test_workshop test_list_mods test_list_mods_index test_list_mods_upload test_mod_warnings test_file_watcher test_overlaps test_unrecognized test_configure test_first_start test_workshop_download test_game_version test_spawn_rooms test_list_env test_help test_vars_documented test_canary_issues test_build_site test_game test_update_check test_entry; do
   ( "${t}"; exit "${FAILED}" ) || FAILED=1
 done
 
