@@ -9,7 +9,6 @@
       --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e2e2dc;
       --accent: #2f6f4e; --code-bg: #f0f0ea;
       --warn: #8a5a00; --warn-bg: #fbf0d9; --bad: #b3261e; --bad-bg: #fbe7e4;
-      --cell-vanilla: #d6d6cf; --cell-mod: #3f74b8; --cell-over: #d39b16; --cell-shared: #c43a2f; --cell-other: #8a4fc4; --cell-focus: #1d1d1b;
       color-scheme: light dark;
     }
     @media (prefers-color-scheme: dark) {
@@ -17,7 +16,6 @@
         --bg: #161714; --panel: #1f201c; --text: #e8e8e2; --muted: #9a9a92; --border: #33352f;
         --accent: #7fc39b; --code-bg: #2a2c26;
         --warn: #e3b558; --warn-bg: #352c1a; --bad: #f08c7e; --bad-bg: #3a221f;
-        --cell-vanilla: #3b3d36; --cell-mod: #6f9fe0; --cell-over: #e8b94a; --cell-shared: #f07a6c; --cell-other: #c39af0; --cell-focus: #f4f4ee;
       }
     }
     * { box-sizing: border-box; }
@@ -135,8 +133,8 @@
     .swatch { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
     .swatch.other { background: none; border: 2px solid var(--cell-other); }
     .swatch.spawn { border-radius: 50%; background: var(--cell-focus); }
-    .swatch.spawn.warn { background: var(--warn); }
-    .swatch.spawn.bad { background: var(--bad); }
+    .swatch.spawn.warn { background: var(--cell-warn); }
+    .swatch.spawn.bad { background: var(--cell-bad); }
     .grid-scroll { overflow: auto; max-height: 70vh; margin: 8px 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
     #map-grid { display: block; touch-action: manipulation; cursor: crosshair; }
     #map-cell { min-height: 1.5em; overflow-wrap: anywhere; }
@@ -326,6 +324,7 @@
   </div>
 </main>
 <div id="drop-overlay" hidden>Drop the list-mods JSON to load it</div>
+<script src="grid.js"></script>
 <script>
   'use strict';
   const VANILLA_MAP = 'Muldraugh, KY';
@@ -360,7 +359,7 @@
   const ZONE_FILES = ['objects.lua', 'regions.lua', 'roomtones.lua'];
   // Cell coordinates and runs far beyond any map, and cells in all of a file's map folders together: a bigger run
   // or file is cut there instead of filling the browser's memory.
-  const CELL_LIMIT = 1 << 20;
+  const CELL_LIMIT = ZomboidMapGrid.LIMIT;
   const MAX_RUN = 4096;
   const MAX_CELLS = 2000000;
   const PROBLEM_KINDS = [
@@ -606,16 +605,10 @@
 
   // Squares on a side of a cell.
   const cellSquares = () => (model.b41 ? 300 : 256);
-  const cellKey = (x, y) => (y + CELL_LIMIT) * 2 * CELL_LIMIT + x + CELL_LIMIT;
-  const cellX = key => (key % (2 * CELL_LIMIT)) - CELL_LIMIT;
-  const cellY = key => Math.floor(key / (2 * CELL_LIMIT)) - CELL_LIMIT;
+  const { cellKey, cellX, cellY } = ZomboidMapGrid;
 
   function folderKeys(folder) {
-    if (!folder.keys) {
-      const keys = new Set();
-      for (const [y, from, to] of folder.runs) for (let x = from; x <= to; x++) keys.add(cellKey(x, y));
-      folder.keys = [...keys];
-    }
+    if (!folder.keys) folder.keys = ZomboidMapGrid.runKeys(folder.runs);
     return folder.keys;
   }
 
@@ -1332,16 +1325,8 @@
     // Shared cells: maps of different items, the vanilla map left out, as the image's start compares them.
     const vanilla = byName.get(VANILLA_MAP);
     const vanillaKeys = new Set(vanilla?.keys);
-    const owners = new Map();
-    for (const m of maps) {
-      if (m === vanilla) continue;
-      for (const key of m.keys) {
-        if (vanillaKeys.has(key)) m.over++;
-        const here = owners.get(key);
-        if (here) here.push(m);
-        else owners.set(key, [m]);
-      }
-    }
+    const owners = ZomboidMapGrid.cellMaps(maps.filter(m => m !== vanilla));
+    for (const m of maps) if (m !== vanilla) m.over = m.keys.filter(key => vanillaKeys.has(key)).length;
     for (const here of owners.values()) {
       for (let a = 0; a < here.length; a++) {
         for (let b = a + 1; b < here.length; b++) {
@@ -2253,7 +2238,13 @@
     row.focus({ preventScroll: true });
   }
 
-  const cssColor = (style, name) => style.getPropertyValue(name).trim();
+  // The grid's colours, which its legend shows too, for the colour scheme.
+  const darkScheme = window.matchMedia('(prefers-color-scheme: dark)');
+  function gridColors() {
+    for (const [name, color] of Object.entries(ZomboidMapGrid.COLORS[darkScheme.matches ? 'dark' : 'light'])) {
+      document.documentElement.style.setProperty(`--cell-${name}`, color);
+    }
+  }
 
   // The cells of the maps in Map= (and of the other maps, as outlines), by what is on them; one map's cells outlined.
   function drawGrid() {
@@ -2262,99 +2253,23 @@
     const others = state.otherMaps ? grid?.others || [] : [];
     const spawn = check.spawn && state.spawnPoints ? check.spawn : null;
     const points = spawn ? spawn.active.flatMap(r => r.points.map(pt => ({ ...pt, region: r.name }))) : [];
-    const all = [...check.maps.map(m => m.keys), ...others.map(o => o.keys), points.map(pt => pt.key)];
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const keys of all) {
-      for (const key of keys) {
-        const x = cellX(key);
-        const y = cellY(key);
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-    if (minX === Infinity) {
-      canvas.hidden = true;
+    const focus = check.byName.get(mapFocus) || others.find(o => o.name === mapFocus);
+    const drawn = ZomboidMapGrid.draw(canvas, {
+      owners: check.owners, vanillaKeys: check.vanillaKeys, others, points, focus: focus ? focus.keys : null,
+      squares: cellSquares(), size: gridSize, width: $('grid-scroll').clientWidth, dark: darkScheme.matches,
+    });
+    canvas.hidden = !drawn;
+    if (!drawn) {
       $('grid-legend').textContent = 'The maps in Map= have no cells.';
       grid = { others, spawnAt: new Map() };
       return;
     }
-    canvas.hidden = false;
-    const cols = maxX - minX + 1;
-    const rows = maxY - minY + 1;
-    const fit = Math.max(1, Math.min(16, Math.floor(($('grid-scroll').clientWidth - 2) / cols)));
-    const size = Math.max(1, Math.min(32, gridSize ?? fit, Math.floor(16384 / Math.max(cols, rows))));
-    const ratio = Math.min(window.devicePixelRatio || 1, Math.max(1, Math.floor(16384 / (Math.max(cols, rows) * size))));
-    canvas.width = cols * size * ratio;
-    canvas.height = rows * size * ratio;
-    canvas.style.width = `${cols * size}px`;
-    canvas.style.height = `${rows * size}px`;
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const style = getComputedStyle(canvas);
-    const colors = Object.fromEntries(['vanilla', 'mod', 'over', 'shared', 'other', 'focus'].map(kind => [kind, cssColor(style, `--cell-${kind}`)]));
-    const gap = size >= 5 ? 1 : 0;
-    const fill = (key, color) => {
-      ctx.fillStyle = color;
-      ctx.fillRect((cellX(key) - minX) * size, (cellY(key) - minY) * size, size - gap, size - gap);
-    };
-    const counts = { vanilla: 0, mod: 0, over: 0, shared: 0 };
-    for (const key of check.vanillaKeys) {
-      if (check.owners.has(key)) continue;
-      counts.vanilla++;
-      fill(key, colors.vanilla);
-    }
-    for (const [key, here] of check.owners) {
-      const kind = here.some(m => m.item !== here[0].item) ? 'shared' : check.vanillaKeys.has(key) ? 'over' : 'mod';
-      counts[kind]++;
-      fill(key, colors[kind]);
-    }
-    ctx.strokeStyle = colors.other;
-    ctx.lineWidth = Math.max(1, Math.min(2, size / 4));
-    const inset = ctx.lineWidth / 2;
-    for (const o of others) {
-      for (const key of o.keys) ctx.strokeRect((cellX(key) - minX) * size + inset, (cellY(key) - minY) * size + inset, size - 2 * inset - gap, size - 2 * inset - gap);
-    }
-    // Spawn points where they are inside their cells, after the cells and outlines so they stay visible.
-    const squares = cellSquares();
     const spawnAt = new Map();
-    const radius = Math.max(1.5, Math.min(4, size / 5));
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = cssColor(style, '--bg');
     for (const pt of points) {
       if (!spawnAt.has(pt.key)) spawnAt.set(pt.key, []);
       spawnAt.get(pt.key).push(pt);
     }
-    // The points with a problem last, so that none hides under a point without one.
-    const rank = { null: 0, warn: 1, bad: 2 };
-    for (const pt of [...points].sort((a, b) => rank[a.level] - rank[b.level])) {
-      ctx.fillStyle = pt.level ? cssColor(style, pt.level === 'bad' ? '--bad' : '--warn') : colors.focus;
-      ctx.beginPath();
-      ctx.arc((pt.x / squares - minX) * size, (pt.y / squares - minY) * size, radius, 0, 2 * Math.PI);
-      ctx.fill();
-      ctx.stroke();
-    }
-    const focus = check.byName.get(mapFocus) || others.find(o => o.name === mapFocus);
-    if (focus) {
-      // The outline of its area: the cell edges that no other cell of the map shares.
-      const own = new Set(focus.keys);
-      ctx.strokeStyle = colors.focus;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (const key of focus.keys) {
-        const x = (cellX(key) - minX) * size;
-        const y = (cellY(key) - minY) * size;
-        if (!own.has(key - 2 * CELL_LIMIT)) { ctx.moveTo(x, y + 1); ctx.lineTo(x + size, y + 1); }
-        if (!own.has(key + 2 * CELL_LIMIT)) { ctx.moveTo(x, y + size - 1); ctx.lineTo(x + size, y + size - 1); }
-        if (!own.has(key - 1)) { ctx.moveTo(x + 1, y); ctx.lineTo(x + 1, y + size); }
-        if (!own.has(key + 1)) { ctx.moveTo(x + size - 1, y); ctx.lineTo(x + size - 1, y + size); }
-      }
-      ctx.stroke();
-    }
+    const { counts } = drawn;
     const legend = [
       ['vanilla', 'Vanilla map only'], ['mod', 'One mod map'], ['over', 'A mod map over the vanilla map'], ['shared', 'Maps of different items'],
     ].map(([kind, label]) => h('span', {}, h('span', { class: 'swatch', style: `background: var(--cell-${kind})` }), `${label} ${counts[kind]}`));
@@ -2368,21 +2283,17 @@
     }
     $('grid-legend').replaceChildren(...legend);
     canvas.setAttribute('aria-label', `Cells of the maps in Map=: ${counts.vanilla} with only the vanilla map, ${counts.mod} with one mod map, ${counts.over} with a mod map over the vanilla map, ${counts.shared} with maps of different items. The list below says the same for each map.`);
-    grid = { others, spawnAt, minX, minY, size, cols, rows };
+    grid = { ...drawn, others, spawnAt };
   }
 
   // The maps on the cell under the pointer, in Map= order.
   function cellAt(event) {
-    if (!grid?.size) return null;
-    const box = $('map-grid').getBoundingClientRect();
-    const x = Math.floor((event.clientX - box.left) / grid.size);
-    const y = Math.floor((event.clientY - box.top) / grid.size);
-    if (x < 0 || y < 0 || x >= grid.cols || y >= grid.rows) return null;
-    const key = cellKey(x + grid.minX, y + grid.minY);
+    const at = ZomboidMapGrid.cellAt(grid?.size ? grid : null, $('map-grid'), event.clientX, event.clientY);
+    if (!at) return null;
     const check = derived.mapCheck;
     // The vanilla map is always last in Map=.
-    const here = [...check.owners.get(key) || [], ...(check.vanillaKeys.has(key) ? [check.byName.get(VANILLA_MAP)] : [])];
-    return { x: x + grid.minX, y: y + grid.minY, here, others: grid.others.filter(o => o.keySet.has(key)), spawns: grid.spawnAt.get(key) || [] };
+    const here = [...check.owners.get(at.key) || [], ...(check.vanillaKeys.has(at.key) ? [check.byName.get(VANILLA_MAP)] : [])];
+    return { x: at.x, y: at.y, here, others: grid.others.filter(o => o.keySet.has(at.key)), spawns: grid.spawnAt.get(at.key) || [] };
   }
 
   function describeCell(cell) {
@@ -3004,7 +2915,11 @@
     gridWidth = entry.contentRect.width;
     requestAnimationFrame(redrawGrid);
   }).observe($('grid-scroll'));
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redrawGrid);
+  gridColors();
+  darkScheme.addEventListener('change', () => {
+    gridColors();
+    redrawGrid();
+  });
   $('copy').addEventListener('click', () => copyText(derived.output.text, $('copy-status')));
   $('download').addEventListener('click', () => saveFile(derived.output.text, 'mods.env'));
   $('default-txt').addEventListener('click', () => saveFile(derived.single.text, 'default.txt'));

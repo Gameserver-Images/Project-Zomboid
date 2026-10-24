@@ -2237,13 +2237,33 @@ ${run}/7"
   expect_eq "$(jq length "${gh}/issues.json")" 4
 }
 
-# The docs site from ci/build_site.sh, with no live site to copy env references from.
+# The docs site from ci/build_site.sh, with no live site to copy env references from, and the map grid from a
+# fake raw.githubusercontent.com that serves GRID_FIXTURE.
 test_build_site() {
   TEST='build site'
-  local site="${WORK}/site" copy="${WORK}/copy" page
+  local site="${WORK}/site" copy="${WORK}/copy" page change
   mkdir -p "${WORK}/site-bin" "${copy}"
-  printf '#!/bin/bash\nprintf 404\n' > "${WORK}/site-bin/curl"
+  cat > "${WORK}/site-bin/curl" <<'CURL'
+#!/bin/bash
+out="" url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    https://raw.githubusercontent.com/*) url="$1" ;;
+  esac
+  shift
+done
+if [ -n "${url}" ]; then
+  echo "${url}" >> "${GRID_URLS}"
+  cp "${GRID_FIXTURE}" "${out}"
+  exit 0
+fi
+printf 404
+CURL
   chmod +x "${WORK}/site-bin/curl"
+  export GRID_FIXTURE="${WORK}/grid-module.js" GRID_URLS="${WORK}/grid-urls"
+  printf '%s\n' '// A grid.' "export const VERSION = '1.4.2';" 'export const LIMIT = 4;' 'const inner = 2;' \
+    'export function cellKey(x, y) { return x + y * inner; }' > "${GRID_FIXTURE}"
   build_site() {
     # $1 = the folder with the site/ to build from
     rm -rf "${site}"
@@ -2255,6 +2275,40 @@ test_build_site() {
     grep -qF '&lt;owner&gt;' "${site}/${page}" && fail "${page} kept the placeholder"
   done
   expect_eq "$(jq -c . "${site}/env/index.json")" '{"files":[]}'
+  # The grid as a classic script from the pinned commit; another repository and commit can replace them.
+  local commit
+  commit="$(sed -n 's/^GRID_COMMIT="${GRID_COMMIT:-\([0-9a-f]\{40\}\)}"$/\1/p' "${REPO}/ci/grid.sh")"
+  expect_eq "$(cat "${site}/grid.js")" "// The Zomboid Map Index's grid 1.4.2 (zexyqag/Zomboid-Map-Index@${commit}) as a classic script.
+const ZomboidMapGrid = (() => {
+// A grid.
+const VERSION = '1.4.2';
+const LIMIT = 4;
+const inner = 2;
+function cellKey(x, y) { return x + y * inner; }
+return Object.freeze({ VERSION, LIMIT, cellKey });
+})();"
+  expect_eq "$(node -e "$(cat "${site}/grid.js"); console.log(ZomboidMapGrid.cellKey(1, 3), Object.keys(ZomboidMapGrid).join())")" "7 VERSION,LIMIT,cellKey"
+  expect_eq "$(cat "${WORK}/grid-urls")" "https://raw.githubusercontent.com/zexyqag/Zomboid-Map-Index/${commit}/site/grid.js"
+  rm -f "${WORK}/grid-urls"
+  GRID_REPO=some/index GRID_COMMIT=abc123 build_site "${REPO}" || fail "the site build failed with another grid: $(cat "${WORK}/out")"
+  expect_eq "$(cat "${WORK}/grid-urls")" "https://raw.githubusercontent.com/some/index/abc123/site/grid.js"
+  # A grid file instead, and grids the page can't use.
+  GRID_FILE="${GRID_FIXTURE}" build_site "${REPO}" || fail "the site build failed with a grid file: $(cat "${WORK}/out")"
+  expect_eq "$(head -n 1 "${site}/grid.js")" "// The Zomboid Map Index's grid 1.4.2 (${GRID_FIXTURE}) as a classic script."
+  for change in 's/^const inner/import inner from "x";\nconst inner/' 's/^const inner/import "x";\nconst inner/' \
+    's/^export const LIMIT/export default 4;\nexport const LIMIT/' 's/^const inner = 2;/export let inner = 2;/' 's/^const inner = 2;/export { inner };/'; do
+    sed "${change}" "${GRID_FIXTURE}" > "${WORK}/grid-bad.js"
+    GRID_FILE="${WORK}/grid-bad.js" build_site "${REPO}" && fail "the site build took a grid changed by ${change}"
+    expect_eq "$(tail -n 1 "${WORK}/out")" "Error: the grid script from ${WORK}/grid-bad.js uses more of modules than the page reads"
+  done
+  for change in "s/'1.4.2'/'2.0.0'/" "s/'1.4.2'/'1.4'/"; do
+    sed "${change}" "${GRID_FIXTURE}" > "${WORK}/grid-bad.js"
+    GRID_FILE="${WORK}/grid-bad.js" build_site "${REPO}" && fail "the site build took a grid changed by ${change}"
+  done
+  expect_eq "$(cat "${WORK}/out")" "Error: the grid script from ${WORK}/grid-bad.js is version unknown, the page calls 1.x"
+  sed "s/'1.4.2'/'2.0.0'/" "${GRID_FIXTURE}" > "${WORK}/grid-bad.js"
+  GRID_FILE="${WORK}/grid-bad.js" build_site "${REPO}"
+  expect_eq "$(cat "${WORK}/out")" "Error: the grid script from ${WORK}/grid-bad.js is version 2.0.0, the page calls 1.x"
   # A page without the placeholder would show no image name, or another one.
   cp -r "${REPO}/site" "${copy}/"
   sed -i 's|ghcr\.io/&lt;owner&gt;/&lt;repo&gt;|ghcr.io/other-owner/other-image|' "${copy}/site/mods.html"

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Assembles the docs site: the pages, with the image name filled in, the env references in <site>/env,
-# and an index of them. References for earlier game builds are copied from the live site, because each
-# deploy replaces it.
+# Assembles the docs site: the pages, with the image name filled in, the map grid the mods page draws
+# with (ci/grid.sh), the env references in <site>/env, and an index of them. References for earlier game
+# builds are copied from the live site, because each deploy replaces it.
 # Usage: build_site.sh <site dir> <live site URL> <image>
 
 set -euo pipefail
@@ -15,6 +15,7 @@ for page in index.html mods.html; do
   sed "s|ghcr\.io/&lt;owner&gt;/&lt;repo&gt;|${image}|g" "site/${page}" > "${site}/${page}"
   grep -qF "${image}" "${site}/${page}" || { echo "Error: site/${page} has no ghcr.io/&lt;owner&gt;/&lt;repo&gt; to put the image name in" >&2; exit 1; }
 done
+bash "$(dirname "$0")/grid.sh" "${site}"
 
 live_index="$(mktemp)"
 status="$(curl -sS -o "${live_index}" -w '%{http_code}' "${base}/env/index.json")"
