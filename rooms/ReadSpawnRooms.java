@@ -1,14 +1,16 @@
 // Prints which buildings of map folders hold spawn points, read from the folders' cell headers
 // (<x>_<y>.lotheader) as the game reads them (IsoMetaGrid's loadCell). A building holds a point when one
-// of its rooms, other than "emptyoutside", has a rectangle with the point on the point's level. Only the
-// header of the point's own cell counts: the game files a room under that cell's chunks only.
-// Build 41 files every room of the cell and the game takes the first one with the point, in file order,
-// so a point counts there only when that room belongs to a building.
+// of its rooms, other than "emptyoutside", has a rectangle with the point on the point's level, and the
+// game files that room under the point's cell: the cell of the header, and in Build 42 also the cells east,
+// south and south-east of the building's first cell when the building reaches past it
+// (addRoomsToAdjacentCells). Build 41 files every room of the cell and the game takes the first one with
+// the point, in file order, so a point counts there only when that room belongs to a building.
 // Usage: java -jar read_spawn_rooms.jar <squares per cell: 256 (Build 42) or 300 (Build 41)> <map folder>...
 // stdin: the points, "<x>\t<y>\t<z>" per line.
 // stdout: "<folder>\t<x>\t<y>\t<z>\t<building x>\t<building y>" for each point and building of the folder
 // that holds it, the building's x and y being the least of all its rooms' rectangles; for a cell header that
-// can't be read, "!\t<folder>\t<file>\t<why>" once and "?\t<folder>\t<x>\t<y>\t<z>" for each point on it.
+// can't be read, "!\t<folder>\t<file>\t<why>" once and, instead of buildings, "?\t<folder>\t<x>\t<y>\t<z>"
+// for each point it could hold.
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -58,6 +60,15 @@ public final class ReadSpawnRooms {
         final List<Room> rooms = new ArrayList<>();
         int x = Integer.MAX_VALUE;
         int y = Integer.MAX_VALUE;
+
+        // Whether the game files the building's rooms under this cell of 256 squares besides the cell of its
+        // header: the cell east, south or south-east of its first cell. (It does when the building reaches past
+        // that one, which a building holding a point there does.)
+        boolean spillsInto(int cellX, int cellY) {
+            int dx = cellX - x / 256;
+            int dy = cellY - y / 256;
+            return dx >= 0 && dx <= 1 && dy >= 0 && dy <= 1 && dx + dy > 0;
+        }
     }
 
     // A cell header that can't be read has neither.
@@ -90,36 +101,52 @@ public final class ReadSpawnRooms {
             for (int[] point : points) {
                 int cellX = Math.floorDiv(point[0], size);
                 int cellY = Math.floorDiv(point[1], size);
-                String name = cellX + "_" + cellY + ".lotheader";
-                if (!cells.containsKey(name)) {
-                    Path file = Path.of(folder, name);
-                    Cell cell = null;
-                    if (Files.isRegularFile(file)) {
-                        try {
-                            cell = read(file, cellX, cellY, size);
-                        } catch (IOException | RuntimeException e) {
-                            out.println("!\t" + folder + "\t" + name + "\t" + e);
-                            cell = UNREADABLE;
+                List<Building> holding = new ArrayList<>();
+                boolean unknown = false;
+                // The point's cell, then in Build 42 the cells west, north and north-west of it.
+                for (int[] at : size == 300 ? new int[][] {{0, 0}} : new int[][] {{0, 0}, {-1, 0}, {0, -1}, {-1, -1}}) {
+                    Cell cell = cell(out, cells, folder, cellX + at[0], cellY + at[1], size);
+                    if (cell == null) continue;
+                    if (cell == UNREADABLE) {
+                        unknown = true;
+                    } else if (size == 300) {
+                        Room first = cell.rooms.stream().filter(r -> r.holds(point)).findFirst().orElse(null);
+                        if (first != null && first.building != null) holding.add(first.building);
+                    } else {
+                        boolean own = at[0] == 0 && at[1] == 0;
+                        for (Building building : cell.buildings) {
+                            if ((own || building.spillsInto(cellX, cellY)) && building.rooms.stream().anyMatch(r -> r.holds(point))) holding.add(building);
                         }
                     }
-                    cells.put(name, cell);
                 }
-                Cell cell = cells.get(name);
-                if (cell == null) continue;
-                if (cell == UNREADABLE) {
+                if (unknown) {
                     out.println("?\t" + folder + "\t" + point[0] + "\t" + point[1] + "\t" + point[2]);
-                } else if (size == 300) {
-                    Room first = cell.rooms.stream().filter(r -> r.holds(point)).findFirst().orElse(null);
-                    if (first != null && first.building != null) print(out, folder, point, first.building);
                 } else {
-                    for (Building building : cell.buildings) {
-                        if (building.rooms.stream().anyMatch(r -> r.holds(point))) print(out, folder, point, building);
-                    }
+                    for (Building building : holding) print(out, folder, point, building);
                 }
             }
         }
         out.flush();
         if (out.checkError()) System.exit(1);
+    }
+
+    // The cell header of a folder, read once: null when there is none, UNREADABLE when it can't be read.
+    private static Cell cell(PrintWriter out, Map<String, Cell> cells, String folder, int cellX, int cellY, int size) {
+        String name = cellX + "_" + cellY + ".lotheader";
+        if (!cells.containsKey(name)) {
+            Path file = Path.of(folder, name);
+            Cell cell = null;
+            if (Files.isRegularFile(file)) {
+                try {
+                    cell = read(file, cellX, cellY, size);
+                } catch (IOException | RuntimeException e) {
+                    out.println("!\t" + folder + "\t" + name + "\t" + e);
+                    cell = UNREADABLE;
+                }
+            }
+            cells.put(name, cell);
+        }
+        return cells.get(name);
     }
 
     private static void print(PrintWriter out, String folder, int[] point, Building building) {

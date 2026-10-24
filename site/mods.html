@@ -1349,8 +1349,9 @@
 
   // Whether a building the game keeps holds a spawn point: true, false, or null when list-mods couldn't tell for a map
   // on its cell. Build 41 takes all of a cell's buildings from the first map in Map= with the cell. Build 42 takes
-  // them from every map with the cell, but drops a map's building where a map earlier in Map= has the 300-square cell
-  // the building starts in (IsoMetaGrid.higherPriority300x300CellExists, MapFiles.hasCell300).
+  // them from every map, as a building can reach into the cell from the one west, north or north-west of it, but drops
+  // a map's building where a map earlier in Map= has the 300-square cell the building starts in
+  // (IsoMetaGrid.higherPriority300x300CellExists, MapFiles.hasCell300).
   function inBuilding(x, y, z, key, maps) {
     const id = `${x},${y},${z}`;
     const on = maps.filter(m => m.keySet.has(key));
@@ -1362,8 +1363,8 @@
       const y256 = Math.floor(cy * 300 / 256);
       return m.keySet.has(cellKey(x256, y256)) && m.keySet.has(cellKey(x256 + 1, y256 + 1));
     };
-    let unknown = false;
-    for (const m of on) {
+    let unknown = on.some(m => !m.rooms);
+    for (const m of maps.filter(e => e.rooms)) {
       if (!corners(m)) {
         unknown = true;
         continue;

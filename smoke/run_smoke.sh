@@ -921,7 +921,9 @@ EOF
     | mod_file "${multi}/common/media/maps/Variant Map/objects.lua"
   printf '%s\n' "local s = v.x .. v.y" | mod_file "${multi}/common/media/lua/server/metazones/metazoneHandler.lua"
   mkdir -p "${STEAMAPPDIR}/media/maps/Muldraugh, KY" "${STEAMAPPDIR}/media/lua/server/metazones"
-  for cell in 0_0 1_0 -1_0; do touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/${cell}.lotheader"; done
+  touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/1_0.lotheader"
+  lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_0.lotheader" 42
+  lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/-1_0.lotheader" 42
   lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_1.lotheader" 42 "room hall 0 0 150 64 1 1" "building 0"
   printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' '}' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/objects.lua"
   printf '%s\n' "print('..v.x..','..v.y..','..v.z)" 'local w = v.x + v.width' > "${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
@@ -1044,11 +1046,11 @@ EOF
   expect_eq "$(jq -c '.server | [.spawnPoint, .spawnRegions]' "${out}")" \
     '[null,[{"name":"Muldraugh, KY","commented":false,"file":"media/maps/Muldraugh, KY/spawnpoints.lua","serverfile":null,"points":null},{"name":"Variant Map","commented":true,"file":"media/maps/Variant Map/spawnpoints.lua","serverfile":null,"points":null},{"name":"Bar","commented":false,"file":null,"serverfile":"pzserver_spawnpoints.lua","points":[[12067,6801,0]]},{"name":"Gone","commented":false,"file":null,"serverfile":"missing_spawnpoints.lua","points":[]}]]'
   expect_eq "$(jq -c '[.items[5].mods[0] | .mapFolders, .zoneLoader]' "${out}")" '[[],null]'
-  # SpawnPoint is checked too; it is on the game's cell 0, 0, whose header can't be read.
-  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '100,200,0'
+  # SpawnPoint is checked too; it is on the game's cell 1, 0, whose header can't be read.
+  set_ini_value "${SERVER}/pzserver.ini" SpawnPoint '300,200,0'
   PATH="${WORK}/bin:${PATH}" WORKSHOP_IDS=' 900;;104 ' bash "${SCRIPT_DIR}/list_mods.sh" > "${WORK}/point" 2> "${WORK}/point-err"
-  expect_eq "$(jq -c '[.server.spawnPoint, .game.mapFolders[0].rooms]' "${WORK}/point")" '["100,200,0",[[100,200,0],[150,320,0,150,320]]]'
-  expect_eq "$(cat "${WORK}/point-err")" "Warning: ${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_0.lotheader could not be read (java.io.EOFException), so the mods page does not check the spawn points on its cell"
+  expect_eq "$(jq -c '[.server.spawnPoint, .game.mapFolders[0].rooms]' "${WORK}/point")" '["300,200,0",[[150,320,0,150,320],[300,200,0]]]'
+  expect_eq "$(cat "${WORK}/point-err")" "Warning: ${STEAMAPPDIR}/media/maps/Muldraugh, KY/1_0.lotheader could not be read (java.io.EOFException), so the mods page does not check the spawn points on its cell"
   set_ini_value "${SERVER}/pzserver.ini" SpawnPoint ''
   expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox, .mapFolders, .zoneLoader)' "${out}")" \
     '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"error":null,"require":["StarlitLibrary","2392709985TsarLib","PlainReq"],"requireEntries":["StarlitLibrary","2392709985TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
@@ -1969,20 +1971,28 @@ test_spawn_rooms() {
   lotheader "${maps}/A/1_2.lotheader" 42 "room kitchen 0 1 10 20 5 5" "room emptyoutside 0 0 0 0 50 50" "room attic 1 0 10 20 5 5" \
     "room loose 0 0 100 100 5 5" "room shed 0 0 40 20 2 2 60 20 2 2" "building 0 1 2" "building 0" "building 4"
   lotheader "${maps}/A/-1_0.lotheader" 42 "room hall 0 0 250 10 4 4" "building 0"
+  # Build 42 also files a building's rooms under the cells east, south and south-east of its first cell: the
+  # hall reaches from 3, 2 into 4, 2, the porch from 3, 1 into 4, 2, but the long room's building starts in 2, 2
+  # and the annex's in 4, 2 itself.
+  lotheader "${maps}/A/3_2.lotheader" 42 "room hall 0 0 250 10 20 5" "room long 0 0 -20 100 300 5" "room annex 0 0 260 60 5 5" \
+    "building 0" "building 1" "building 2"
+  lotheader "${maps}/A/3_1.lotheader" 42 "room porch 0 0 250 250 10 10" "building 0"
   lotheader "${maps}/B/1_2.lotheader" 42.0 "room bedroom 0 0 10 20 5 5" "building 0"
   lotheader "${maps}/C/whole.lotheader" 42 "room kitchen 0 1 10 20 5 5" "building 0"
   head -c 60 "${maps}/C/whole.lotheader" > "${maps}/C/1_2.lotheader"
   lotheader "${maps}/D/1_2.lotheader" 41 "room kitchen 0 0 10 20 5 5" "building 0"
   out="$(printf '%s\n' '266	532	0' '270	536	0' '271	532	0' '266	532	1' '266	532	2' '290	540	0' '356	612	0' '317	533	0' '700	700	0' '-5	11	0' \
-    | spawn_rooms 256 "${maps}/A" "${maps}/B" 2> "${WORK}/err")" || fail "the reader failed: $(cat "${WORK}/err")"
+    '1020	524	0' '1030	524	0' '1026	515	0' '1040	614	0' '1030	574	0' | spawn_rooms 256 "${maps}/A" "${maps}/B" 2> "${WORK}/err")" || fail "the reader failed: $(cat "${WORK}/err")"
   expect_eq "${out}" "$(printf '%s\n' \
     "${maps}/A	266	532	0	256	512" "${maps}/A	266	532	0	266	532" "${maps}/A	270	536	0	256	512" "${maps}/A	270	536	0	266	532" \
     "${maps}/A	266	532	1	256	512" "${maps}/A	317	533	0	296	532" "${maps}/A	-5	11	0	-6	10" \
+    "${maps}/A	1020	524	0	1018	522" "${maps}/A	1030	524	0	1018	522" "${maps}/A	1026	515	0	1018	506" \
     "${maps}/B	266	532	0	266	532" "${maps}/B	270	536	0	266	532")"
-  # A header it can't read is named once, with each point on its cell.
-  expect_eq "$(printf '%s\n' '266	532	0' '270	536	0' '700	700	0' | spawn_rooms 256 "${maps}/C" "${maps}/D")" "$(printf '%s\n' \
-    "!	${maps}/C	1_2.lotheader	java.io.EOFException" "?	${maps}/C	266	532	0" "?	${maps}/C	270	536	0" \
-    "!	${maps}/D	1_2.lotheader	java.io.IOException: invalid chunk width 10x10" "?	${maps}/D	266	532	0" "?	${maps}/D	270	536	0")"
+  # A header it can't read is named once, with each point on its cell and on the cells east, south and
+  # south-east of it.
+  expect_eq "$(printf '%s\n' '266	532	0' '270	536	0' '700	700	0' '1100	1100	0' | spawn_rooms 256 "${maps}/C" "${maps}/D")" "$(printf '%s\n' \
+    "!	${maps}/C	1_2.lotheader	java.io.EOFException" "?	${maps}/C	266	532	0" "?	${maps}/C	270	536	0" "?	${maps}/C	700	700	0" \
+    "!	${maps}/D	1_2.lotheader	java.io.IOException: invalid chunk width 10x10" "?	${maps}/D	266	532	0" "?	${maps}/D	270	536	0" "?	${maps}/D	700	700	0")"
   # Build 41 takes the first room with the point, in file order, and a room outside any building is one.
   lotheader "${maps}/E/0_0.lotheader" 41 "room loose 0 0 10 10 5 5" "room shop 0 0 10 10 5 5" "room store 0 0 50 50 5 5" "building 1 2"
   expect_eq "$(printf '%s\n' '12	12	0' '52	52	0' | spawn_rooms 300 "${maps}/E")" "${maps}/E	52	52	0	10	10"
