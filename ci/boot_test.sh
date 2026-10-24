@@ -171,6 +171,17 @@ warned="$(docker logs "${name}" 2>&1 | grep -oE 'initSpawnBuildings: no room or 
 [ "$(sort -u <<< "${outside}")" = "${warned}" ] \
   || fail "list-mods finds these spawn points in no building: ${outside:-none}; the server warned about these: ${warned:-none}"
 echo "::notice title=Spawn buildings::${label}: $(jq '.outside | length' <<< "${buildings}") of $(jq .points <<< "${buildings}") spawn points in no building, as the server says"
+# The names the spawn list shows for the game's own regions, by the mods page's rule; the page flags none.
+names="$(jq -c '(.game.mapTitles | map({key: .name, value: .}) | from_entries) as $titles
+  | (.gameVersion | split(".") | map(tonumber)) as $v
+  | (if $v[0] < 42 or ($v[0] == 42 and $v[1] <= 13) then "txt" elif $v[0] == 42 and $v[1] >= 20 then "json" else null end) as $reads
+  | [.server.spawnRegions[] | select(.commented | not) | .name as $name | ($titles[$name] // {}) as $t
+    | ($t.title // $name) as $info
+    | {name: $name, shown: (if $t.mapInfo and $reads then $t[$reads] // $info else $name end),
+       flagged: ($t.mapInfo == true and $reads != null and $t[$reads] == null
+         and ($t[if $reads == "json" then "txt" else "json" end] // $info) != $info)}]' <<< "${mods_json}")"
+jq -e 'all(.flagged | not)' <<< "${names}" > /dev/null || fail "the mods page would flag the names of the game's own spawn regions: ${names}"
+echo "::notice title=Spawn list names::${label}: $(jq -r 'map("\(.name) as \"\(.shown)\"") | join(", ")' <<< "${names}")"
 
 stop_server 1
 

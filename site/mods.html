@@ -374,6 +374,7 @@
     ['zones', 'Maps that stop the map zones', 'The game loads map zones (car spawns, animals, basements, water and the like) from the last map in Map= to the first, and stops at the first zone it fails on, so the maps above that one in Map= lose theirs. Maps says what to move.'],
     ['cells', 'Maps of different items that share cells', () => `${sharedRule()} Maps shows where.`],
     ['spawns', 'Spawn points outside buildings or on no map', 'The game keeps zombies and story events out of the building a new character starts in, so a point outside any building gets neither, and one on an upper floor may drop the character. Which buildings there are depends on Map=: where maps share cells, the buildings of a map earlier in it win. On a cell no map has there is nothing. With list-mods from an older image the buildings are unknown, and points where another map than their own comes first are listed instead. Maps shows the points.'],
+    ['spawnNames', 'Spawn regions shown under another name', "The spawn list shows a region named after a map with the map's title, which the game reads from Translate/EN/<map>.json from Build 42.20 on and from Translate/EN/<map>/title.txt before. These maps have their title only in the other file, so the list shows the title in their map.info, or the folder's name. Rename the region in pzserver_spawnregions.lua to a name no map has a folder for and the list shows it as written; the image keeps the line, as it goes by the file path. The map's author can fix it for everyone by adding the file this version reads."],
     ['folders', 'Maps with fewer cells than one of their folders', "The game reads all of a map's cells from one folder: the one of the mod loaded last that has a folder of that name. For these maps, another mod's or the game's folder has more cells."],
     ['duplicate', 'Mod IDs in several items'],
     ['unknown', 'Enabled but not in any downloaded item'],
@@ -591,6 +592,18 @@
     return folders;
   }
 
+  // A mod's or the game's map titles as list-mods read them: per map folder name, whether it has a map.info and its
+  // title= line, and the English translations' titles, from Translate/EN/<map>.json and <map>/title.txt.
+  function mapTitles(raw) {
+    const titles = new Map();
+    const title = v => (typeof v === 'string' ? v : null);
+    for (const t of list(raw)) {
+      if (!oneLine(t?.name) || titles.has(t.name)) continue;
+      titles.set(t.name, { mapInfo: t.mapInfo === true, title: title(t.title), json: title(t.json), txt: title(t.txt) });
+    }
+    return titles;
+  }
+
   // Squares on a side of a cell.
   const cellSquares = () => (model.b41 ? 300 : 256);
   const cellKey = (x, y) => (y + CELL_LIMIT) * 2 * CELL_LIMIT + x + CELL_LIMIT;
@@ -634,7 +647,9 @@
     const budget = { cells: MAX_CELLS };
     // An older image's list-mods has no map files.
     const game = json.game && typeof json.game === 'object' && !Array.isArray(json.game) ? json.game : null;
-    m.game = game && { folders: mapFolders(game.mapFolders, budget), zoneLoader: typeof game.zoneLoader === 'boolean' ? game.zoneLoader : null };
+    m.game = game && {
+      folders: mapFolders(game.mapFolders, budget), zoneLoader: typeof game.zoneLoader === 'boolean' ? game.zoneLoader : null, titles: mapTitles(game.mapTitles),
+    };
     // The keys of pzserver.ini by their lower case: DoLuaChecksum, then the server's, or without them the anti-cheat
     // settings the game code shows for this version.
     const known = settings ? [] : m.b41 ? B41_KEYS : m.b4220 ? ANTICHEATS.map(key => [key, 'number']) : [];
@@ -671,6 +686,7 @@
           error: text(rawMod.error) ?? (rawMod.id !== rawMod.id.trim() ? "its id= has spaces around it, which the server's Mods= can't match" : null),
           sandbox: list(rawMod.sandbox).map(sandboxOption),
           folders: mapFolders(rawMod.mapFolders, budget), zoneLoader: typeof rawMod.zoneLoader === 'boolean' ? rawMod.zoneLoader : null,
+          titles: mapTitles(rawMod.mapTitles),
         };
         // The game loads the require entries as written, and one with spaces around it names no mod.
         const spaced = mod.requireEntries.find(r => r !== r.trim()) ?? null;
@@ -1260,8 +1276,8 @@
   // cells and, while the game's zone loader fails on zones that lack what it needs, the first map whose zones it stops at.
   function checkMaps(loaded, p) {
     const sources = [
-      ...loaded.map(entry => entry.inst).filter(Boolean).reverse().map(inst => ({ inst, folders: inst.mod.folders, loader: inst.mod.zoneLoader })),
-      { inst: null, folders: model.game.folders, loader: model.game.zoneLoader },
+      ...loaded.map(entry => entry.inst).filter(Boolean).reverse().map(inst => ({ inst, folders: inst.mod.folders, loader: inst.mod.zoneLoader, titles: inst.mod.titles })),
+      { inst: null, folders: model.game.folders, loader: model.game.zoneLoader, titles: model.game.titles },
     ];
     const who = source => (source.inst ? source.inst.id : 'the game');
     const cellCount = folder => folder.runs.reduce((n, [, from, to]) => n + to - from + 1, 0);
@@ -1413,7 +1429,27 @@
       const points = raw.map(pt => check(pt, own));
       return { ...r, mapName, own, found: r.file ? Boolean(source) : true, from: source?.inst?.id ?? null, points };
     });
+    // The name the spawn list shows for a region named after a map folder (one with a map.info) is the map's title,
+    // which English translations replace: from Build 42.20 on Translate/EN/<map>.json, in Build 41 and 42.13
+    // <map>/title.txt (the versions between aren't checked). Each comes from the mod loaded last that has it, else
+    // the game. A region is listed when no mod that loads has the file this version reads, and the map has another title
+    // in the other file.
+    const reads = model.b4220 ? 'json' : model.b41 || versionNumber(model.gameVersion) <= 42013 ? 'txt' : null;
+    const titleOf = (name, kind) => sources.find(s => s.titles.get(name)?.[kind] != null)?.titles.get(name)[kind] ?? null;
+    const shownAs = name => {
+      const info = sources.find(s => s.titles.get(name)?.mapInfo)?.titles.get(name);
+      if (!reads || !info || titleOf(name, reads) !== null) return null;
+      const shown = info.title ?? name;
+      const meant = titleOf(name, reads === 'json' ? 'txt' : 'json');
+      return meant !== null && meant !== shown ? { shown, meant, file: reads === 'json' ? `Translate/EN/${name}/title.txt` : `Translate/EN/${name}.json` } : null;
+    };
+    for (const r of checked) r.shownAs = shownAs(r.name);
     const active = point ? [] : checked.filter(r => !r.commented);
+    for (const r of active.filter(r => r.shownAs)) {
+      const { shown, meant, file } = r.shownAs;
+      p.spawnNames.push({ text: `${r.name}: shown as "${shown}"`, go: () => goToMap(r.own ? r.own.name : VANILLA_MAP) });
+      r.own?.notes.push({ level: 'warn', text: `Spawn region ${r.name}: the spawn list shows it as "${shown}". Its title "${meant}" is only in ${file}, which ${model.gameVersion} doesn't read.` });
+    }
     for (const r of active) {
       const bad = r.points.filter(pt => pt.problem === 'nomap').length;
       const outside = r.points.filter(pt => pt.problem === 'outside').length;
@@ -2187,8 +2223,9 @@
       const [bad, outside, covered] = [count('nomap'), count('outside'), count('covered')];
       const parts = [!r.found ? "its spawnpoints.lua is in no mod that loads" : plural(r.points.length, 'point'),
         source, r.added ? 'added on the next start' : null, outside ? `${outside} outside any building` : null,
-        covered ? `${covered} where another map comes first` : null, bad ? `${bad} on cells no map has` : null].filter(Boolean);
-      const level = spawn.point ? 'muted' : bad ? 'bad' : outside || covered ? 'warn' : null;
+        covered ? `${covered} where another map comes first` : null, bad ? `${bad} on cells no map has` : null,
+        r.shownAs ? `shown in the spawn list as "${r.shownAs.shown}"` : null].filter(Boolean);
+      const level = spawn.point ? 'muted' : bad ? 'bad' : outside || covered || r.shownAs ? 'warn' : null;
       const name = r.mapName && derived.mapCheck.byName.has(r.mapName) ? r.mapName : null;
       rows.push(h('li', { class: level },
         name ? h('button', { type: 'button', class: 'link', text: r.name, 'aria-pressed': String(mapFocus === name), onclick: () => focusMap(name) }) : r.name,

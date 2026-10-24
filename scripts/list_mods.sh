@@ -170,8 +170,10 @@ sandbox_options < "${tmp}/standalone" | sed 's/^/option\t/' >> "${tmp}/files"
 # The map files of every mod whose mod.info the game reads, and of the game ("game"), for the mods page to
 # pick from in load order as the game does: of a mod's folders (the version folder, then common/), the first
 # with a map folder gives the map's cells (<x>_<y>.lotheader), the first with a zone file gives that file, and
-# the first with metazoneHandler.lua the zone loader, the first with spawnpoints.lua the map's spawn points.
-declare -A map_seen=() zone_seen=() loader_seen=()
+# the first with metazoneHandler.lua the zone loader, the first with spawnpoints.lua the map's spawn points,
+# and the first with map.info the map's title, which English translations replace: Translate/EN/<map>.json
+# from Build 42.20 on (the first of the mod's folders with a title), <map>/title.txt before.
+declare -A map_seen=() zone_seen=() loader_seen=() title_seen=()
 while IFS=$'\t' read -r key media; do
   handler="${media}/lua/server/metazones/metazoneHandler.lua"
   if [ -z "${loader_seen[${key}]+x}" ] && [ -f "${handler}" ]; then
@@ -187,12 +189,28 @@ while IFS=$'\t' read -r key media; do
       map_seen["${key}"$'\t'"${name}"]=1
       printf 'folder\t%s\t%s\t%s\n' "${key}" "${name}" "${map_dir}"
     fi
-    for file in objects.lua regions.lua roomtones.lua spawnpoints.lua; do
+    for file in objects.lua regions.lua roomtones.lua spawnpoints.lua map.info; do
       if [ -z "${zone_seen[${key}$'\t'${name}$'\t'${file}]+x}" ] && [ -f "${map_dir}/${file}" ]; then
         zone_seen["${key}"$'\t'"${name}"$'\t'"${file}"]=1
-        printf '%s\t%s\t%s\t%s\t%s\n' "$([ "${file}" = spawnpoints.lua ] && echo spawn || echo zone)" "${key}" "${name}" "${file}" "${map_dir}/${file}"
+        case "${file}" in
+          spawnpoints.lua) kind=spawn ;;
+          map.info) kind=info ;;
+          *) kind=zone ;;
+        esac
+        printf '%s\t%s\t%s\t%s\t%s\n' "${kind}" "${key}" "${name}" "${file}" "${map_dir}/${file}"
       fi
     done
+  done
+  for file in "${media}"/lua/shared/Translate/EN/*.json; do
+    [ ! -f "${file}" ] || printf 'json\t%s\t%s\tjson\t%s\n' "${key}" "$(basename "${file}" .json)" "${file}"
+  done
+  for file in "${media}"/lua/shared/Translate/EN/*/title.txt; do
+    name="${file%/title.txt}"
+    name="${name##*/}"
+    if [ -z "${title_seen[${key}$'\t'${name}]+x}" ] && [ -f "${file}" ]; then
+      title_seen["${key}"$'\t'"${name}"]=1
+      printf 'txt\t%s\t%s\ttitle.txt\t%s\n' "${key}" "${name}" "${file}"
+    fi
   done
 done < <(mod_dirs < "${tmp}/mods" | awk -F '\t' '{ print $1 "/" $2 "\t" $4 "/media" }'; printf 'game\t%s\n' "${STEAMAPPDIR}/media") > "${tmp}/map_files"
 # The cells of each map folder as runs [y, first x, last x], by y and x.
@@ -213,6 +231,47 @@ fi | LC_ALL=C awk -F '\t' '$2 ~ /^-?[0-9]+_-?[0-9]+\.lotheader$/ { split($2, at,
     END { if (folder != "") { flush(); print "]" } }
   ' > "${tmp}/cells"
 awk -F '\t' '$1 == "zone" { print $5 }' "${tmp}/map_files" | zone_stops > "${tmp}/zone_stops"
+# The titles of the map folders' names: of map.info its last title= line (whether it has one, then the
+# title), of an English translation its "title" as a JSON string, of title.txt its first line.
+LC_ALL=C awk -F '\t' -v OFS='\t' '
+  FNR == NR { if ($1 == "folder") maps[$3]; next }
+  !($3 in maps) { next }
+  $1 == "info" {
+    has = 0
+    title = ""
+    while ((getline line < $5) > 0) {
+      sub(/\r$/, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (substr(line, 1, 6) == "title=") {
+        has = 1
+        title = line
+        gsub(/title=/, "", title)
+      }
+    }
+    close($5)
+    print "info", $2, $3, has, title
+  }
+  $1 == "json" {
+    text = ""
+    while ((getline line < $5) > 0) text = text line "\n"
+    close($5)
+    if (match(text, /"title"[ \t\r\n]*:[ \t\r\n]*"([^"\\]|\\.)*"/)) {
+      title = substr(text, RSTART, RLENGTH)
+      sub(/^"title"[ \t\r\n]*:[ \t\r\n]*/, "", title)
+      print "json", $2, $3, title
+    }
+  }
+  $1 == "txt" {
+    line = ""
+    if ((getline line < $5) > 0) {
+      sub(/\r$/, "", line)
+      sub(/^\357\273\277/, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+    }
+    close($5)
+    if (line != "") print "txt", $2, $3, line
+  }
+' "${tmp}/map_files" "${tmp}/map_files" > "${tmp}/titles"
 # The spawn regions the server's file names, commented out or not; a region's points come from a map's
 # spawnpoints.lua (file) or from a file in the server's folder (serverfile).
 spawn_file="${HOMEDIR}/Zomboid/Server/${SERVERNAME:-pzserver}_spawnregions.lua"
@@ -281,6 +340,7 @@ jq -n -c \
   --rawfile regions "${tmp}/regions" \
   --rawfile spawns "${tmp}/spawns" \
   --rawfile rooms "${tmp}/rooms" \
+  --rawfile titles "${tmp}/titles" \
   --arg spawn_dir "${spawn_file%/*}" \
   --arg spawn_point "${server_spawn_point}" '
   def lines: split("\n") | map(select(length > 0));
@@ -329,6 +389,15 @@ jq -n -c \
           spawns: $map_spawns[.[1] + "\t" + .[2]], rooms: ($held[.[3]] // [])}) | sort_by(.name))})
       | from_entries) as $folders
   | ($map_files | map(select(.[0] == "loader") | {key: .[1], value: (.[2] == "true")}) | from_entries) as $loaders
+  # Per map name the first of each kind of title; a translation counts only as a valid, non-empty string.
+  | ($titles | rows | map(if .[0] == "json" then .[3] = (.[3] | try fromjson catch "") else . end)
+      | map(select(.[0] != "json" or .[3] != "")) | group_by(.[1])
+      | map({key: .[0][1], value: (group_by(.[2]) | map({name: .[0][2],
+          mapInfo: any(.[0] == "info"),
+          title: (first(.[] | select(.[0] == "info" and .[3] == "1") | .[4]) // null),
+          json: (first(.[] | select(.[0] == "json") | .[3]) // null),
+          txt: (first(.[] | select(.[0] == "txt") | .[3]) // null)}))})
+      | from_entries) as $map_titles
 
   # Defaults as the game reads them: strings as written, empty too, and booleans true only when they say true in any case.
   | def sandbox($labels):
@@ -345,7 +414,8 @@ jq -n -c \
        tooltip: (if .translation == "" then null else $labels["Sandbox_" + .translation + "_tooltip"] end),
        current: (if .option | split(".") | any(secret) then null else $current[.env | ascii_downcase] end)};
 
-  def map_files($key): {mapFolders: ($folders[$key] // []), zoneLoader: (if $loaders | has($key) then $loaders[$key] else null end)};
+  def map_files($key): {mapFolders: ($folders[$key] // []), zoneLoader: (if $loaders | has($key) then $loaders[$key] else null end),
+    mapTitles: ($map_titles[$key] // [])};
 
   # error: why the game does not find the mod. requireEntries: the require entries as the game loads
   # them, untrimmed and with empty ones.

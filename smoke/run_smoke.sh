@@ -919,6 +919,14 @@ EOF
   printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' \
     '  { name = "", type = "WaterZone", geometry = "polygon", points = { 1, 2, 3, 4 } },' '}' \
     | mod_file "${multi}/common/media/maps/Variant Map/objects.lua"
+  # Map titles: map.info's last title= line, a translation's "title" from the first of the mod's folders
+  # with one that isn't empty, title.txt's first line; translations only count for map folder names.
+  printf '%s\n' 'title=See media/lua/shared/Translate/EN/Variant Map/title.txt' 'description=A map' | mod_file "${multi}/42.21/media/maps/Variant Map/map.info"
+  printf '\357\273\277  Variant Town \r\nsecond line\r\n' | mod_file "${multi}/common/media/lua/shared/Translate/EN/Variant Map/title.txt"
+  printf '%s\n' 'description=No title' | mod_file "${multi}/common/media/maps/Common Map/map.info"
+  printf '%s\n' '{' '  "title": ""' '}' | mod_file "${multi}/42.21/media/lua/shared/Translate/EN/Common Map.json"
+  printf '%s\n' '{' '  "description": "With a \"title\": inside",' '  "title" : "Common \"Title\" \u00e9"' '}' | mod_file "${multi}/common/media/lua/shared/Translate/EN/Common Map.json"
+  printf '%s\n' '{ "title": "Nowhere" }' | mod_file "${multi}/common/media/lua/shared/Translate/EN/Nowhere.json"
   printf '%s\n' "local s = v.x .. v.y" | mod_file "${multi}/common/media/lua/server/metazones/metazoneHandler.lua"
   mkdir -p "${STEAMAPPDIR}/media/maps/Muldraugh, KY" "${STEAMAPPDIR}/media/lua/server/metazones"
   touch "${STEAMAPPDIR}/media/maps/Muldraugh, KY/1_0.lotheader"
@@ -926,6 +934,7 @@ EOF
   lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/-1_0.lotheader" 42
   lotheader "${STEAMAPPDIR}/media/maps/Muldraugh, KY/0_1.lotheader" 42 "room hall 0 0 150 64 1 1" "building 0"
   printf '%s\n' 'objects = {' '  { name = "", type = "Vehicle", x = 1, y = 2, z = 0, width = 3, height = 4 },' '}' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/objects.lua"
+  printf '%s\r\n' 'title=Old' '  title=Muldraugh, KY  ' > "${STEAMAPPDIR}/media/maps/Muldraugh, KY/map.info"
   printf '%s\n' "print('..v.x..','..v.y..','..v.z)" 'local w = v.x + v.width' > "${STEAMAPPDIR}/media/lua/server/metazones/metazoneHandler.lua"
   # Spawn points in both forms, once each however often professions repeat them; a table without posY,
   # one with only worldX, a comment and a point by position don't count.
@@ -1042,7 +1051,7 @@ EOF
   expect_eq "$(jq -c '.items[3].mods[0].sandbox | map([.env, .label])' "${out}")" '[["SANDBOX_Hidden__X",null]]'
   expect_eq "$(jq -S -c '.items[0].mods[1] | [.mapFolders, .zoneLoader]' "${out}")" \
     '[[{"cells":[],"name":"Common Map","rooms":[],"spawns":null,"zones":{}},{"cells":[],"name":"Muldraugh, KY","rooms":[],"spawns":null,"zones":{}},{"cells":[[5,10,12],[6,10,10]],"name":"Variant Map","rooms":[[2600,1290,0,2600,1290]],"spawns":[[3012,1534,1],[2600,1290,0],[2601,1290,0]],"zones":{"objects.lua":3,"regions.lua":null}}],false]'
-  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","rooms":[[150,320,0,150,320]],"spawns":[[150,320,0]],"zones":{"objects.lua":null}}],"zoneLoader":true}'
+  expect_eq "$(jq -S -c '.game' "${out}")" '{"mapFolders":[{"cells":[[0,-1,1],[1,0,0]],"name":"Muldraugh, KY","rooms":[[150,320,0,150,320]],"spawns":[[150,320,0]],"zones":{"objects.lua":null}}],"mapTitles":[{"json":null,"mapInfo":true,"name":"Muldraugh, KY","title":"Muldraugh, KY","txt":null}],"zoneLoader":true}'
   expect_eq "$(jq -c '.server | [.spawnPoint, .spawnRegions]' "${out}")" \
     '[null,[{"name":"Muldraugh, KY","commented":false,"file":"media/maps/Muldraugh, KY/spawnpoints.lua","serverfile":null,"points":null},{"name":"Variant Map","commented":true,"file":"media/maps/Variant Map/spawnpoints.lua","serverfile":null,"points":null},{"name":"Bar","commented":false,"file":null,"serverfile":"pzserver_spawnpoints.lua","points":[[12067,6801,0]]},{"name":"Gone","commented":false,"file":null,"serverfile":"missing_spawnpoints.lua","points":[]}]]'
   expect_eq "$(jq -c '[.items[5].mods[0] | .mapFolders, .zoneLoader]' "${out}")" '[[],null]'
@@ -1052,7 +1061,9 @@ EOF
   expect_eq "$(jq -c '[.server.spawnPoint, .game.mapFolders[0].rooms]' "${WORK}/point")" '["300,200,0",[[150,320,0,150,320],[300,200,0]]]'
   expect_eq "$(cat "${WORK}/point-err")" "Warning: ${STEAMAPPDIR}/media/maps/Muldraugh, KY/1_0.lotheader could not be read (java.io.EOFException), so the mods page does not check the spawn points on its cell"
   set_ini_value "${SERVER}/pzserver.ini" SpawnPoint ''
-  expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox, .mapFolders, .zoneLoader)' "${out}")" \
+  expect_eq "$(jq -c '.items[0].mods[1].mapTitles' "${out}")" \
+    '[{"name":"Common Map","mapInfo":true,"title":null,"json":"Common \"Title\" é","txt":null},{"name":"Variant Map","mapInfo":true,"title":"See media/lua/shared/Translate/EN/Variant Map/title.txt","json":null,"txt":"Variant Town"}]'
+  expect_eq "$(jq -c '.items[0].mods[1] | del(.sandbox, .mapFolders, .zoneLoader, .mapTitles)' "${out}")" \
     '{"id":"MultiMod","folder":"Multi Version","versionFolder":"42.21","name":"Multi 42.21","description":null,"author":"Someone","modVersion":"42.21","url":"https://example.com","category":null,"versionMin":"42.21","versionMax":null,"error":null,"require":["StarlitLibrary","2392709985TsarLib","PlainReq"],"requireEntries":["StarlitLibrary","2392709985TsarLib","PlainReq"],"loadModAfter":["AfterMe"],"loadModBefore":["BeforeOne","BeforeTwo"],"incompatible":["Enemy"],"maps":["Common Map","Variant Map"]}'
   expect_eq "$(jq -c '.items[0].mods[1].sandbox | map([.env, .type, .default, .current])' "${out}")" \
     '[["SANDBOX_Multi__Mode","enum","1","2"],["SANDBOX_Multi__Strength","integer","10",null],["SANDBOX_Multi__Shared","double","1.5",null],["SANDBOX_MultiNoDot","boolean","true","false"]]'
